@@ -76,6 +76,11 @@ struct Desktop {
     drag_dx: i32,
     drag_dy: i32,
     dirty: bool,
+    /* ---- 终端（第 2 个窗口）的行编辑状态 ---- */
+    term_line: [u8; 64],
+    term_len: usize,
+    term_log: [&'static str; 8],
+    term_n: usize,
 }
 
 impl Desktop {
@@ -126,6 +131,10 @@ impl Desktop {
             drag_dx: 0,
             drag_dy: 0,
             dirty: true,
+            term_line: [0; 64],
+            term_len: 0,
+            term_log: ["LumiOS shell (builtin)", "type help + Enter", "", "", "", "", "", ""],
+            term_n: 2,
         }
     }
 
@@ -265,6 +274,21 @@ pub extern "C" fn _start() -> ! {
                     d.wins[d.focus].visible = false;
                     d.dirty = true;
                 }
+                KEY_ENTER => term_run(&mut d),
+                KEY_BACKSPACE => {
+                    if d.term_len > 0 {
+                        d.term_len -= 1;
+                        d.dirty = true;
+                    }
+                }
+                c if (0x20..0x7F).contains(&c) => {
+                    if d.term_len < d.term_line.len() - 1 {
+                        d.term_line[d.term_len] = c;
+                        d.term_len += 1;
+                        d.dirty = true;
+                        repaint_term(&mut d);
+                    }
+                }
                 _ => {}
             }
         }
@@ -358,6 +382,57 @@ fn draw_window(c: &Canvas, w: &Win, focused: bool) {
         None => c.fill(w.x, w.y + TITLE_H, w.w, w.h - TITLE_H, WIN_BG),
     }
     let _ = (OK, w.color);
+}
+
+/// 执行终端里当前这一行（只做内建命令；外部程序要等 fork/exec 接进来）。
+fn term_run(d: &mut Desktop) {
+    let line = unsafe { core::str::from_utf8_unchecked(&d.term_line[..d.term_len]) };
+    let cmd = line.trim();
+    let out: &'static str = if cmd.is_empty() {
+        ""
+    } else if cmd == "help" {
+        "builtin: help / clear / version / about"
+    } else if cmd == "clear" {
+        ""
+    } else if cmd == "version" {
+        "LumiOS 0.1  (kernel LumiKernel 1.3.1)"
+    } else if cmd == "about" {
+        "4 apps only: desktop, files, terminal, browser"
+    } else if cmd.starts_with("echo ") {
+        // 回显内容直接借用静态说明位（受限于无分配器的简化实现）
+        "echo: (argument echo pending)"
+    } else {
+        "unknown command, try: help"
+    };
+    if cmd == "clear" {
+        d.term_n = 0;
+    } else if !out.is_empty() && d.term_log[(d.term_n + 7) % 8] != out {
+        let slot = d.term_n % 8;
+        d.term_log[slot] = out;
+        if d.term_n < 8 {
+            d.term_n += 1;
+        }
+    }
+    d.term_len = 0;
+    d.dirty = true;
+    repaint_term(d);
+}
+
+fn repaint_term(d: &mut Desktop) {
+    let w = d.wins[1];
+    if let Some(cv) = w.canvas {
+        paint_body(&cv, &w);
+        let mut y = 66;
+        for i in 0..d.term_n {
+            cv.text_bg(34, y, d.term_log[i], OK, WIN_BG);
+            y += 18;
+        }
+        // 当前输入行 + 光标
+        let line = unsafe { core::str::from_utf8_unchecked(&d.term_line[..d.term_len]) };
+        cv.text_bg(34, y + 10, ">", ACCENT, WIN_BG);
+        cv.text_bg(50, y + 10, line, TEXT, WIN_BG);
+        cv.fill(50 + (d.term_len as i32) * 8, y + 10, 8, 16, ACCENT);
+    }
 }
 
 /// 把窗口内容画进它自己的缓冲。
