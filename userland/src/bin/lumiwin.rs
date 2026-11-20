@@ -56,6 +56,12 @@ struct Win {
     body: &'static str,
     color: u32,
     visible: bool,
+    /// 这个窗口的像素缓冲（共享内存映射过来的画布）。
+    ///
+    /// 现在由窗口服务自己填内容；接客户端时，客户端进程用**同一个 shm id**
+    /// 映射同一块内存，往里面画，服务端只管把 `canvas` 贴到屏幕上。
+    /// 这就是整个系统唯一的"应用-窗口"接口，没有 X11、没有 socket 协议栈。
+    canvas: Option<Canvas>,
 }
 
 const NWIN: usize = 3;
@@ -84,6 +90,7 @@ impl Desktop {
                 body: "F1  ·  待接入客户端",
                 color: 0x00B8_8A4A,
                 visible: true,
+                canvas: None,
             },
             Win {
                 x: 300,
@@ -94,6 +101,7 @@ impl Desktop {
                 body: "F2  ·  待接入客户端",
                 color: 0x003F_C46A,
                 visible: true,
+                canvas: None,
             },
             Win {
                 x: 420,
@@ -104,6 +112,7 @@ impl Desktop {
                 body: "F3  ·  待接入客户端",
                 color: 0x004C_9AFF,
                 visible: true,
+                canvas: None,
             },
         ];
         let _ = (w, h);
@@ -169,6 +178,25 @@ pub extern "C" fn _start() -> ! {
     println("[lumiwin] 窗口服务启动");
 
     let mut d = Desktop::new(c.width as i32, c.height as i32);
+
+    // 给每个窗口分配自己的像素缓冲，并把内容画进去。
+    // 缓冲是内核共享内存（`shm_alloc`/`shm_map`），将来客户端进程映射同一块
+    // 即可直接画——服务端一个字节都不用改。
+    for i in 0..NWIN {
+        let w = d.wins[i];
+        let body_w = w.w - 2;
+        let body_h = w.h - TITLE_H;
+        let pages = ((body_w * body_h * 4) as usize + 4095) / 4096;
+        if let Ok(id) = Ok::<i64, ()>(shm_alloc(pages)) {
+            if id > 0 {
+                if let Some(va) = shm_map(id) {
+                    let cv = Canvas::from_shm(va, body_w as u32, body_h as u32);
+                    paint_body(&cv, &w);
+                    d.wins[i].canvas = Some(cv);
+                }
+            }
+        }
+    }
 
     loop {
         // ---- 事件：鼠标优先，键盘其次 ----
@@ -271,7 +299,8 @@ fn draw_all(c: &Canvas, d: &Desktop) {
         }
     }
 
-    draw_taskbar(c, d);
+    // 按用户要求：不要任务栏。窗口自己带标题栏就够了，
+    // 少一条常驻横条 = 多 28 px 可用区域，也更符合"极简"的定位。
     draw_cursor(c, d.mx, d.my);
 }
 
@@ -323,33 +352,27 @@ fn draw_window(c: &Canvas, w: &Win, focused: bool) {
     c.fill(bx, w.y, TITLE_H, TITLE_H, CLOSE);
     c.text(bx + 10, w.y + 6, "x", TEXT);
 
-    // 内容占位：左侧色条 + 说明
-    c.fill(w.x + 20, w.y + TITLE_H + 20, 6, w.h - TITLE_H - 40, w.color);
-    c.text(w.x + 40, w.y + TITLE_H + 22, w.title, TEXT);
-    c.text(w.x + 40, w.y + TITLE_H + 44, w.body, TEXT_DIM);
-    c.text(w.x + 40, w.y + TITLE_H + 70, "drag the title bar", TEXT_DIM);
-    let _ = OK;
+    // 内容来自窗口自己的缓冲（将来是客户端画进去的像素）
+    match &w.canvas {
+        Some(cv) => c.blit(cv, w.x, w.y + TITLE_H),
+        None => c.fill(w.x, w.y + TITLE_H, w.w, w.h - TITLE_H, WIN_BG),
+    }
+    let _ = (OK, w.color);
 }
 
-fn draw_taskbar(c: &Canvas, d: &Desktop) {
-    let h = 28;
-    let y = c.height as i32 - h;
-    c.fill(0, y, c.width as i32, h, 0x000D_141C);
-    c.fill(0, y, c.width as i32, 1, WIN_BORDER);
-    c.text(12, y + 6, "LumiOS", ACCENT);
-    let mut x = 90;
-    for (i, name) in ["Files", "Term", "Web"].iter().enumerate() {
-        let active = d.wins[i].visible;
-        let col = if active { TEXT } else { TEXT_DIM };
-        c.text(x, y + 6, name, col);
-        // 活动指示条
-        if active {
-            c.fill(x, y + h - 3, (name.len() as i32) * 8, 2, ACCENT);
-        }
-        x += 80;
-    }
-    // 焦点窗口标题
-    c.text(c.width as i32 - 260, y + 6, "ALT+TAB  switch   ESC close", TEXT_DIM);
+/// 把窗口内容画进它自己的缓冲。
+///
+/// 现在画的是占位内容；接客户端时这个函数会**整体搬到客户端进程**里，
+/// 服务端只保留 `blit`。
+fn paint_body(cv: &Canvas, w: &Win) {
+    cv.clear(WIN_BG);
+    cv.fill(16, 16, 6, cv.height as i32 - 32, w.color);
+    cv.text(34, 18, w.title, TEXT);
+    cv.text(34, 40, w.body, TEXT_DIM);
+    cv.text(34, 66, "own pixel buffer (shm)", TEXT_DIM);
+    cv.fill(34, 94, cv.width as i32 - 60, 1, WIN_BORDER);
+    cv.text(34, 104, "close: x  /  ESC", TEXT_DIM);
+    cv.text(34, 124, "switch: ALT+TAB", TEXT_DIM);
 }
 
 fn draw_cursor(c: &Canvas, x: i32, y: i32) {
