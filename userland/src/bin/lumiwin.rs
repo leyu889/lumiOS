@@ -188,6 +188,10 @@ pub extern "C" fn _start() -> ! {
 
     let mut d = Desktop::new(c.width as i32, c.height as i32);
 
+    // 上一轮的疏漏：终端只在按键时重绘，启动后仍显示占位文字。
+    // 布局完先画一次，屏幕上立刻就能看到 shell 提示符。
+    repaint_term(&mut d);
+
     // 给每个窗口分配自己的像素缓冲，并把内容画进去。
     // 缓冲是内核共享内存（`shm_alloc`/`shm_map`），将来客户端进程映射同一块
     // 即可直接画——服务端一个字节都不用改。
@@ -388,19 +392,37 @@ fn draw_window(c: &Canvas, w: &Win, focused: bool) {
 fn term_run(d: &mut Desktop) {
     let line = unsafe { core::str::from_utf8_unchecked(&d.term_line[..d.term_len]) };
     let cmd = line.trim();
+    // 内建命令表：全部返回静态串。
+    // "动态输出"（echo 回显参数、ls 列真实目录）需要固定大小的行缓冲，
+    // 那是下一步的事；这里先把命令面铺开，让终端真的能用起来。
     let out: &'static str = if cmd.is_empty() {
         ""
     } else if cmd == "help" {
-        "builtin: help / clear / version / about"
+        "help clear version about apps keys whoami pwd ls uname date"
     } else if cmd == "clear" {
         ""
     } else if cmd == "version" {
-        "LumiOS 0.1  (kernel LumiKernel 1.3.1)"
+        "LumiOS 0.1  /  kernel LumiKernel 1.3.1 M12"
     } else if cmd == "about" {
-        "4 apps only: desktop, files, terminal, browser"
+        "4 apps: desktop, files, terminal, browser"
+    } else if cmd == "apps" {
+        "F1 Files   F2 Terminal   F3 Browser"
+    } else if cmd == "keys" {
+        "ALT+TAB switch   ESC close   drag = title bar"
+    } else if cmd == "whoami" {
+        "user"
+    } else if cmd == "pwd" {
+        "/"
+    } else if cmd == "ls" {
+        "bin   dev   etc   home   tmp"
+    } else if cmd == "uname" {
+        "LumiOS 0.1 x86_64"
+    } else if cmd == "date" {
+        "date: no RTC driver yet"
+    } else if cmd == "echo" {
+        "usage: echo <text>  (dynamic output TBD)"
     } else if cmd.starts_with("echo ") {
-        // 回显内容直接借用静态说明位（受限于无分配器的简化实现）
-        "echo: (argument echo pending)"
+        "echo: dynamic output needs a line buffer (TBD)"
     } else {
         "unknown command, try: help"
     };
