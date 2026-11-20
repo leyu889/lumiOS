@@ -24,6 +24,8 @@ pub const SYS_WRITE: u64 = 1;
 pub const SYS_OPEN: u64 = 2;
 pub const SYS_CLOSE: u64 = 3;
 pub const SYS_BRK: u64 = 12;
+pub const SYS_FORK: u64 = 57;
+pub const SYS_EXECVE: u64 = 59;
 pub const SYS_GETPID: u64 = 39;
 pub const SYS_EXIT: u64 = 60;
 /// LumiOS 扩展（不属于 Linux 号段）
@@ -69,6 +71,30 @@ pub fn open(path: &str, flags: u64) -> i64 {
 
 pub fn close(fd: i64) -> i64 {
     call(SYS_CLOSE, fd as u64, 0, 0)
+}
+
+/// fork：父进程返回子进程 tid，子进程返回 0，失败返回负 errno。
+pub fn fork() -> i64 {
+    call(SYS_FORK, 0, 0, 0)
+}
+
+/// execve：路径要以 NUL 结尾。成功不返回。
+pub fn execve(path: &str, argv: &[&str]) -> i64 {
+    let mut pb = [0u8; 128];
+    let n = path.len().min(127);
+    pb[..n].copy_from_slice(&path.as_bytes()[..n]);
+    // 参数最多 8 个，全部指向栈上的 NUL 结尾缓冲
+    let mut store = [[0u8; 64]; 8];
+    let mut ptrs = [0u64; 10];
+    let cnt = argv.len().min(8);
+    for i in 0..cnt {
+        let a = argv[i].as_bytes();
+        let l = a.len().min(63);
+        store[i][..l].copy_from_slice(&a[..l]);
+        ptrs[i] = store[i].as_ptr() as u64;
+    }
+    ptrs[cnt] = 0;
+    call(SYS_EXECVE, pb.as_ptr() as u64, ptrs.as_ptr() as u64, 0)
 }
 
 pub fn getpid() -> i64 {

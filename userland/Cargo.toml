@@ -16,6 +16,10 @@ name = "lumiwin"
 path = "src/bin/lumiwin.rs"
 
 [[bin]]
+name = "lumifork"
+path = "src/bin/lumifork.rs"
+
+[[bin]]
 name = "lumidemo"
 path = "src/bin/lumidemo.rs"
 

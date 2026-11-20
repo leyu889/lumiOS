@@ -33,7 +33,7 @@ RUSTFLAGS = " ".join([
 ])
 
 # 用户态要构建哪些程序：名字 → ELF 文件名（与 Cargo.toml 的 [[bin]] 对应）
-BINS = ["lumiwin", "lumidemo"]
+BINS = ["lumiwin", "lumidemo", "lumifork"]
 
 
 def main():
