@@ -1,0 +1,24 @@
+[package]
+name = "lumi-userland"
+version = "0.1.0"
+edition = "2021"
+description = "LumiOS 用户态：窗口服务、文件管理器、终端、浏览器"
+
+# 独立 workspace：不和内核共用 profile / target 配置
+[workspace]
+
+[lib]
+name = "liblumi"
+path = "src/lib.rs"
+
+[[bin]]
+name = "lumiwin"
+path = "src/bin/lumiwin.rs"
+
+[[bin]]
+name = "lumidemo"
+path = "src/bin/lumidemo.rs"
+
+[profile.release]
+panic = "abort"
+opt-level = 2
