@@ -79,7 +79,12 @@ struct Desktop {
     /* ---- 终端（第 2 个窗口）的行编辑状态 ---- */
     term_line: [u8; 64],
     term_len: usize,
-    term_log: [&'static str; 8],
+    /* ---- 文件管理器（第 0 个窗口）---- */
+    fm_entries: [DirEnt; DIR_MAX],
+    fm_n: usize,
+    fm_sel: usize,
+    /// 终端输出（字节流，按换行分行绘制）
+    term_text: [u8; 2048],
     term_n: usize,
 }
 
@@ -133,8 +138,11 @@ impl Desktop {
             dirty: true,
             term_line: [0; 64],
             term_len: 0,
-            term_log: ["LumiOS shell (builtin)", "type help + Enter", "", "", "", "", "", ""],
-            term_n: 2,
+            fm_entries: [DirEnt { name: [0; 32], len: 0, is_dir: false }; DIR_MAX],
+            fm_n: 0,
+            fm_sel: 0,
+            term_text: [0; 2048],
+            term_n: 0,
         }
     }
 
@@ -188,9 +196,6 @@ pub extern "C" fn _start() -> ! {
 
     let mut d = Desktop::new(c.width as i32, c.height as i32);
 
-    // 上一轮的疏漏：终端只在按键时重绘，启动后仍显示占位文字。
-    // 布局完先画一次，屏幕上立刻就能看到 shell 提示符。
-    repaint_term(&mut d);
 
     // 给每个窗口分配自己的像素缓冲，并把内容画进去。
     // 缓冲是内核共享内存（`shm_alloc`/`shm_map`），将来客户端进程映射同一块
@@ -210,6 +215,18 @@ pub extern "C" fn _start() -> ! {
             }
         }
     }
+
+    // **必须放在缓冲分配之后**：repaint_term 要靠 wins[1].canvas 才画得出来。
+    // 上一版插在分配之前，canvas 还是 None，于是启动后屏幕上仍是占位内容。
+    // 目录系统：启动就读一次当前目录，文件管理器直接显示真实内容
+    fm_refresh(&mut d);
+
+    out_str(&mut d, "LumiOS shell - type help");
+    out_nl(&mut d);
+    d.term_line[0] = b'l';
+    d.term_line[1] = b's';
+    d.term_len = 2;
+    term_run(&mut d);
 
     loop {
         // ---- 事件：鼠标优先，键盘其次 ----
@@ -260,9 +277,9 @@ pub extern "C" fn _start() -> ! {
                 continue;
             }
             match k.code {
-                KEY_F1 => open(&mut d, 0),
-                KEY_F2 => open(&mut d, 1),
-                KEY_F3 => open(&mut d, 2),
+                KEY_F1 => open_app(&mut d, 0),
+                KEY_F2 => open_app(&mut d, 1),
+                KEY_F3 => open_app(&mut d, 2),
                 KEY_TAB if k.is_alt() => {
                     // ALT+TAB：按 z 序往下切一层
                     let cur = d.zorder[NWIN - 1];
@@ -277,6 +294,28 @@ pub extern "C" fn _start() -> ! {
                 KEY_ESC => {
                     d.wins[d.focus].visible = false;
                     d.dirty = true;
+                }
+                KEY_UP => {
+                    if d.fm_sel > 0 {
+                        d.fm_sel -= 1;
+                        fm_paint(&mut d);
+                    }
+                }
+                KEY_DOWN => {
+                    if d.fm_sel + 1 < d.fm_n {
+                        d.fm_sel += 1;
+                        fm_paint(&mut d);
+                    }
+                }
+                KEY_ENTER if d.focus == 0 => {
+                    // 文件管理器里回车 = 进入选中的目录（文件暂不支持打开）
+                    if d.fm_sel < d.fm_n && d.fm_entries[d.fm_sel].is_dir {
+                        let name = d.fm_entries[d.fm_sel].as_str();
+                        if chdir(name) == 0 {
+                            d.fm_sel = 0;
+                            fm_refresh(&mut d);
+                        }
+                    }
                 }
                 KEY_ENTER => term_run(&mut d),
                 KEY_BACKSPACE => {
@@ -309,7 +348,7 @@ pub extern "C" fn _start() -> ! {
     }
 }
 
-fn open(d: &mut Desktop, idx: usize) {
+fn open_app(d: &mut Desktop, idx: usize) {
     d.wins[idx].visible = true;
     d.raise(idx);
 }
@@ -647,55 +686,245 @@ fn stub_for(cmd: &str) -> Option<&'static str> {
 }
 
 /// 执行终端里当前这一行（只做内建命令；外部程序要等 fork/exec 接进来）。
-fn term_run(d: &mut Desktop) {
-    let line = unsafe { core::str::from_utf8_unchecked(&d.term_line[..d.term_len]) };
-    let cmd = line.trim();
-    // 内建命令表：全部返回静态串。
-    // "动态输出"（echo 回显参数、ls 列真实目录）需要固定大小的行缓冲，
-    // 那是下一步的事；这里先把命令面铺开，让终端真的能用起来。
-    let out: &'static str = if cmd.is_empty() {
-        ""
-    } else if cmd == "help" {
-        "help clear version about apps keys whoami pwd ls uname date"
-    } else if cmd == "clear" {
-        ""
-    } else if cmd == "version" {
-        "LumiOS 0.1  /  kernel LumiKernel 1.3.1 M12"
-    } else if cmd == "about" {
-        "4 apps: desktop, files, terminal, browser"
-    } else if cmd == "apps" {
-        "F1 Files   F2 Terminal   F3 Browser"
-    } else if cmd == "keys" {
-        "ALT+TAB switch   ESC close   drag = title bar"
-    } else if cmd == "whoami" {
-        "user"
-    } else if cmd == "pwd" {
-        "/"
-    } else if cmd == "ls" {
-        "bin   dev   etc   home   tmp"
-    } else if cmd == "uname" {
-        "LumiOS 0.1 x86_64"
-    } else if cmd == "date" {
-        "date: no RTC driver yet"
-    } else if cmd == "echo" {
-        "usage: echo <text>  (dynamic output TBD)"
-    } else if cmd.starts_with("echo ") {
-        "echo: dynamic output needs a line buffer (TBD)"
-    } else {
-        match stub_for(cmd) {
-            Some(m) => m,
-            None => "unknown command, try: help",
-        }
-    };
-    if cmd == "clear" {
-        d.term_n = 0;
-    } else if !out.is_empty() && d.term_log[(d.term_n + 7) % 8] != out {
-        let slot = d.term_n % 8;
-        d.term_log[slot] = out;
-        if d.term_n < 8 {
+/// 往终端输出追加一段文本（满两千字节就不再涨）。
+fn out_str(d: &mut Desktop, s: &str) {
+    for b in s.bytes() {
+        if d.term_n < d.term_text.len() {
+            d.term_text[d.term_n] = b;
             d.term_n += 1;
         }
     }
+}
+
+fn out_nl(d: &mut Desktop) {
+    out_str(d, "\n");
+}
+
+fn out_i64(d: &mut Desktop, mut v: i64) {
+    if v < 0 {
+        out_str(d, "-");
+        v = -v;
+    }
+    if v == 0 {
+        out_str(d, "0");
+        return;
+    }
+    let mut tmp = [0u8; 20];
+    let mut i = 0usize;
+    while v > 0 && i < 20 {
+        tmp[i] = b'0' + (v % 10) as u8;
+        v /= 10;
+        i += 1;
+    }
+    while i > 0 {
+        i -= 1;
+        let one = [tmp[i]];
+        out_str(d, unsafe { core::str::from_utf8_unchecked(&one) });
+    }
+}
+
+/// 把文件内容按可打印字符打到终端（非 ASCII 直接跳过，避免乱码）。
+fn dump_fd(d: &mut Desktop, fd: i64, limit_lines: Option<i64>) {
+    let mut buf = [0u8; 512];
+    let mut lines = 0i64;
+    loop {
+        let n = read(fd, &mut buf);
+        if n <= 0 {
+            break;
+        }
+        for i in 0..n as usize {
+            let b = buf[i];
+            if b == b'\n' {
+                out_nl(d);
+                lines += 1;
+                if let Some(l) = limit_lines {
+                    if lines >= l {
+                        return;
+                    }
+                }
+            } else if (0x20..0x7F).contains(&b) {
+                let one = [b];
+                out_str(d, unsafe { core::str::from_utf8_unchecked(&one) });
+            }
+        }
+    }
+}
+
+/// 执行终端里当前这一行。
+///
+/// 这里有一批命令是**真的会干活**的：走系统调用读目录、读文件、切目录、删文件。
+/// 没实现的两类会如实说明原因（内核缺 syscall / 未预装工具）。
+fn term_run(d: &mut Desktop) {
+    // 先把命令行拷到本地：后面要 &mut d 输出，不能再借着 d 的不可变引用
+    let mut lbuf = [0u8; 64];
+    let ln = d.term_len.min(64);
+    lbuf[..ln].copy_from_slice(&d.term_line[..ln]);
+    let cmdline = unsafe { core::str::from_utf8_unchecked(&lbuf[..ln]) }.trim();
+
+    out_str(d, "> ");
+    out_str(d, cmdline);
+    out_nl(d);
+
+    let mut it = cmdline.split_whitespace();
+    let cmd = it.next().unwrap_or("");
+    let arg = it.next().unwrap_or("");
+
+    match cmd {
+        "" => {}
+        "help" => {
+            out_str(d, "real: ls cat head wc pwd cd rm echo clear version");
+            out_nl(d);
+            out_str(d, "stub: any other name explains why");
+            out_nl(d);
+        }
+        "clear" => d.term_n = 0,
+        "version" => {
+            out_str(d, "LumiOS 0.1  /  LumiKernel 1.3.1 M12");
+            out_nl(d);
+        }
+        "ls" => {
+            let mut ents = [DirEnt { name: [0; 32], len: 0, is_dir: false }; DIR_MAX];
+            let n = readdir(if arg.is_empty() { "." } else { arg }, &mut ents);
+            if n < 0 {
+                out_str(d, "ls: cannot open directory");
+                out_nl(d);
+            } else {
+                let mut width = 0;
+                for i in 0..n as usize {
+                    let name = ents[i].as_str();
+                    if name == "." || name == ".." {
+                        continue;
+                    }
+                    if width + name.len() > 32 {
+                        out_nl(d);
+                        width = 0;
+                    }
+                    out_str(d, name);
+                    if ents[i].is_dir {
+                        out_str(d, "/");
+                    }
+                    out_str(d, "  ");
+                    width += name.len() + 3;
+                }
+                out_nl(d);
+            }
+        }
+        "cat" => {
+            if arg.is_empty() {
+                out_str(d, "usage: cat <file>");
+                out_nl(d);
+            } else {
+                let fd = liblumi::open(arg, liblumi::O_RDONLY);
+                if fd < 0 {
+                    out_str(d, "cat: no such file");
+                    out_nl(d);
+                } else {
+                    dump_fd(d, fd, None);
+                    close(fd);
+                    out_nl(d);
+                }
+            }
+        }
+        "head" => {
+            if arg.is_empty() {
+                out_str(d, "usage: head <file>");
+                out_nl(d);
+            } else {
+                let fd = liblumi::open(arg, liblumi::O_RDONLY);
+                if fd < 0 {
+                    out_str(d, "head: no such file");
+                    out_nl(d);
+                } else {
+                    dump_fd(d, fd, Some(8));
+                    close(fd);
+                    out_nl(d);
+                }
+            }
+        }
+        "wc" => {
+            if arg.is_empty() {
+                out_str(d, "usage: wc <file>");
+                out_nl(d);
+            } else {
+                let fd = liblumi::open(arg, liblumi::O_RDONLY);
+                if fd < 0 {
+                    out_str(d, "wc: no such file");
+                    out_nl(d);
+                } else {
+                    let mut buf = [0u8; 512];
+                    let mut bytes = 0i64;
+                    let mut lines = 0i64;
+                    loop {
+                        let n = read(fd, &mut buf);
+                        if n <= 0 {
+                            break;
+                        }
+                        bytes += n;
+                        for i in 0..n as usize {
+                            if buf[i] == b'\n' {
+                                lines += 1;
+                            }
+                        }
+                    }
+                    close(fd);
+                    out_i64(d, lines);
+                    out_str(d, " lines  ");
+                    out_i64(d, bytes);
+                    out_str(d, " bytes");
+                    out_nl(d);
+                }
+            }
+        }
+        "pwd" => {
+            let mut buf = [0u8; 128];
+            let n = getcwd(&mut buf);
+            if n > 0 {
+                let len = ((n as usize).saturating_sub(1)).min(127);
+                out_str(d, unsafe { core::str::from_utf8_unchecked(&buf[..len]) });
+            } else {
+                out_str(d, "/");
+            }
+            out_nl(d);
+        }
+        "cd" => {
+            if arg.is_empty() {
+                out_str(d, "usage: cd <dir>");
+                out_nl(d);
+            } else if chdir(arg) < 0 {
+                out_str(d, "cd: no such directory");
+                out_nl(d);
+            }
+        }
+        "rm" => {
+            if arg.is_empty() {
+                out_str(d, "usage: rm <file>");
+                out_nl(d);
+            } else if unlink(arg) < 0 {
+                out_str(d, "rm: failed");
+                out_nl(d);
+            } else {
+                out_str(d, "removed");
+                out_nl(d);
+            }
+        }
+        "echo" => {
+            let rest = cmdline.strip_prefix("echo").unwrap_or("").trim_start();
+            out_str(d, rest);
+            out_nl(d);
+        }
+        _ => {
+            match stub_for(cmd) {
+                Some(m) => {
+                    out_str(d, cmd);
+                    out_str(d, ": ");
+                    out_str(d, m);
+                }
+                None => out_str(d, "unknown command, try: help"),
+            }
+            out_nl(d);
+        }
+    }
+
     d.term_len = 0;
     d.dirty = true;
     repaint_term(d);
@@ -705,16 +934,92 @@ fn repaint_term(d: &mut Desktop) {
     let w = d.wins[1];
     if let Some(cv) = w.canvas {
         paint_body(&cv, &w);
-        let mut y = 66;
-        for i in 0..d.term_n {
-            cv.text_bg(34, y, d.term_log[i], OK, WIN_BG);
-            y += 18;
+        let text = &d.term_text[..d.term_n];
+        let mut starts = [0usize; 48];
+        let mut lens = [0usize; 48];
+        let mut n = 0usize;
+        let mut start = 0usize;
+        for i in 0..text.len() {
+            if text[i] == b'\n' && n < 48 {
+                starts[n] = start;
+                lens[n] = i - start;
+                n += 1;
+                start = i + 1;
+            }
         }
-        // 当前输入行 + 光标
+        if n < 48 {
+            starts[n] = start;
+            lens[n] = text.len() - start;
+            n += 1;
+        }
+        let first = n.saturating_sub(17);
+        let mut y = 34;
+        for i in first..n {
+            let s = unsafe {
+                core::str::from_utf8_unchecked(&text[starts[i]..starts[i] + lens[i]])
+            };
+            cv.text_bg(34, y, s, TEXT, WIN_BG);
+            y += 16;
+        }
         let line = unsafe { core::str::from_utf8_unchecked(&d.term_line[..d.term_len]) };
-        cv.text_bg(34, y + 10, ">", ACCENT, WIN_BG);
-        cv.text_bg(50, y + 10, line, TEXT, WIN_BG);
-        cv.fill(50 + (d.term_len as i32) * 8, y + 10, 8, 16, ACCENT);
+        cv.text_bg(34, y + 2, ">", ACCENT, WIN_BG);
+        cv.text_bg(50, y + 2, line, TEXT, WIN_BG);
+        cv.fill(50 + (d.term_len as i32) * 8, y + 2, 8, 16, ACCENT);
+    }
+}
+
+
+/// 重新读取当前目录，填进文件管理器的列表。
+fn fm_refresh(d: &mut Desktop) {
+    let mut ents = [DirEnt { name: [0; 32], len: 0, is_dir: false }; DIR_MAX];
+    let n = readdir(".", &mut ents);
+    if n <= 0 {
+        d.fm_n = 0;
+    } else {
+        // 过滤掉 . 与 ..，列表里只显示真实条目
+        let mut k = 0usize;
+        for i in 0..n as usize {
+            let nm = ents[i].as_str();
+            if nm == "." || nm == ".." {
+                continue;
+            }
+            if k >= DIR_MAX {
+                break; // 目录项超过上限就截断，绝不越界写
+            }
+            d.fm_entries[k] = ents[i];
+            k += 1;
+        }
+        d.fm_n = k;
+    }
+    if d.fm_sel >= d.fm_n {
+        d.fm_sel = d.fm_n.saturating_sub(1);
+    }
+    fm_paint(d);
+}
+
+/// 把列表画进窗口自己的缓冲。
+fn fm_paint(d: &mut Desktop) {
+    let w = d.wins[0];
+    if let Some(cv) = w.canvas {
+        paint_body(&cv, &w);
+        if d.fm_n == 0 {
+            cv.text_bg(34, 40, "(empty directory)", TEXT_DIM, WIN_BG);
+            return;
+        }
+        let mut y = 34i32;
+        let first = if d.fm_sel >= 14 { d.fm_sel - 13 } else { 0 };
+        for i in first..d.fm_n.min(first + 14) {
+            let e = d.fm_entries[i];
+            let name = e.as_str();
+            let selected = i == d.fm_sel;
+            let bg = if selected { ACCENT } else { WIN_BG };
+            let fg = if selected { 0x0000_0000 } else if e.is_dir { 0x00E8_C46A } else { TEXT };
+            cv.fill(16, y - 2, cv.width as i32 - 32, 16, bg);
+            cv.text_bg(24, y, if e.is_dir { "/" } else { " " }, fg, bg);
+            cv.text_bg(36, y, name, fg, bg);
+            y += 17;
+        }
+        cv.text_bg(34, cv.height as i32 - 22, "UP/DOWN move  ENTER open  BS up", TEXT_DIM, WIN_BG);
     }
 }
 
@@ -729,8 +1034,6 @@ fn paint_body(cv: &Canvas, w: &Win) {
     cv.text(34, 40, w.body, TEXT_DIM);
     cv.text(34, 66, "own pixel buffer (shm)", TEXT_DIM);
     cv.fill(34, 94, cv.width as i32 - 60, 1, WIN_BORDER);
-    cv.text(34, 104, "close: x  /  ESC", TEXT_DIM);
-    cv.text(34, 124, "switch: ALT+TAB", TEXT_DIM);
 }
 
 fn draw_cursor(c: &Canvas, x: i32, y: i32) {

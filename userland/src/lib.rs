@@ -29,6 +29,10 @@ pub const SYS_EXECVE: u64 = 59;
 pub const SYS_GETPID: u64 = 39;
 pub const SYS_EXIT: u64 = 60;
 /// LumiOS 扩展（不属于 Linux 号段）
+pub const SYS_GETDENTS64: u64 = 217;
+pub const SYS_UNLINK: u64 = 87;
+pub const SYS_GETCWD: u64 = 79;
+pub const SYS_CHDIR: u64 = 80;
 pub const SYS_LUMI: u64 = 0x400;
 
 #[inline(always)]
@@ -60,6 +64,11 @@ pub fn write(fd: i64, buf: &[u8]) -> i64 {
 pub fn read(fd: i64, buf: &mut [u8]) -> i64 {
     call(SYS_READ, fd as u64, buf.as_mut_ptr() as u64, buf.len() as u64)
 }
+
+pub const O_RDONLY: u64 = 0;
+pub const O_WRONLY: u64 = 1;
+pub const O_CREAT: u64 = 0o100;
+pub const O_TRUNC: u64 = 0o1000;
 
 pub fn open(path: &str, flags: u64) -> i64 {
     // 内核的 open 期望以 NUL 结尾的路径
@@ -95,6 +104,86 @@ pub fn execve(path: &str, argv: &[&str]) -> i64 {
     }
     ptrs[cnt] = 0;
     call(SYS_EXECVE, pb.as_ptr() as u64, ptrs.as_ptr() as u64, 0)
+}
+
+/// 一次 readdir 拿到的目录项数量上限（够列一层目录）。
+pub const DIR_MAX: usize = 64;
+
+/// 目录项：名字 + 类型。
+#[derive(Clone, Copy)]
+pub struct DirEnt {
+    pub name: [u8; 32],
+    pub len: u8,
+    pub is_dir: bool,
+}
+
+impl DirEnt {
+    pub fn as_str(&self) -> &str {
+        // SAFETY: 名字来自内核返回的字节串，这里只按 ASCII 打印，非法字节会被跳过。
+        core::str::from_utf8(&self.name[..self.len as usize]).unwrap_or("?")
+    }
+}
+
+/// 读一个目录，返回条目数。`path` 传 "." 表示当前目录。
+///
+/// 解析的是 Linux `struct linux_dirent64`：u64 ino / i64 off / u16 reclen /
+/// u8 type / name...（name 以 NUL 结尾，reclen 按 8 字节对齐，所以**必须
+/// 按 reclen 步进**，不能按名字长度推进——这是最容易写错的地方）。
+pub fn readdir(path: &str, out: &mut [DirEnt; DIR_MAX]) -> i64 {
+    let fd = open(path, 0);
+    if fd < 0 {
+        return -1;
+    }
+    let mut buf = [0u8; 2048];
+    let n = call(SYS_GETDENTS64, fd as u64, buf.as_mut_ptr() as u64, buf.len() as u64);
+    close(fd);
+    if n <= 0 {
+        return 0;
+    }
+    let mut off = 0usize;
+    let mut cnt = 0usize;
+    while off + 19 <= n as usize && cnt < DIR_MAX {
+        let reclen = u16::from_le_bytes([buf[off + 16], buf[off + 17]]) as usize;
+        if reclen < 20 || off + reclen > n as usize {
+            break;
+        }
+        let dtype = buf[off + 18];
+        let name_start = off + 19;
+        let mut l = 0usize;
+        while name_start + l < off + reclen && buf[name_start + l] != 0 {
+            l += 1;
+        }
+        let mut e = DirEnt {
+            name: [0; 32],
+            len: 0,
+            is_dir: dtype == 4,
+        };
+        let l = l.min(31);
+        e.name[..l].copy_from_slice(&buf[name_start..name_start + l]);
+        e.len = l as u8;
+        out[cnt] = e;
+        cnt += 1;
+        off += reclen;
+    }
+    cnt as i64
+}
+
+pub fn unlink(path: &str) -> i64 {
+    let mut pb = [0u8; 128];
+    let n = path.len().min(127);
+    pb[..n].copy_from_slice(&path.as_bytes()[..n]);
+    call(SYS_UNLINK, pb.as_ptr() as u64, 0, 0)
+}
+
+pub fn getcwd(buf: &mut [u8]) -> i64 {
+    call(SYS_GETCWD, buf.as_mut_ptr() as u64, buf.len() as u64, 0)
+}
+
+pub fn chdir(path: &str) -> i64 {
+    let mut pb = [0u8; 128];
+    let n = path.len().min(127);
+    pb[..n].copy_from_slice(&path.as_bytes()[..n]);
+    call(SYS_CHDIR, pb.as_ptr() as u64, 0, 0)
 }
 
 pub fn getpid() -> i64 {
@@ -299,12 +388,23 @@ impl Canvas {
         }
     }
 
+    /// 填充矩形。**所有参数先钳到画布内**——负坐标或超出边界的矩形
+    /// 以前会退化成"逐点调用 put"，而 put 每次都要判一次边界，
+    /// 一旦调用方算了负的宽高就会白跑几十万次循环（甚至写飞）。
+    /// 统一在入口钳一次，比在每个调用点写检查可靠。
     pub fn fill(&self, x: i32, y: i32, w: i32, h: i32, color: u32) {
         if w <= 0 || h <= 0 {
             return;
         }
-        for yy in y..(y + h) {
-            for xx in x..(x + w) {
+        let x0 = x.max(0).min(self.width as i32);
+        let y0 = y.max(0).min(self.height as i32);
+        let x1 = (x + w).max(0).min(self.width as i32);
+        let y1 = (y + h).max(0).min(self.height as i32);
+        if x1 <= x0 || y1 <= y0 {
+            return;
+        }
+        for yy in y0..y1 {
+            for xx in x0..x1 {
                 self.put(xx, yy, color);
             }
         }
@@ -342,7 +442,13 @@ impl Canvas {
 
     /// 带底色的文字（先抹掉整行高度，避免叠加残影）。
     pub fn text_bg(&self, x: i32, y: i32, s: &str, fg: u32, bg: u32) {
-        self.fill(x, y, (s.len() as i32) * 8, 16, bg);
+        // 宽度按"画布剩余宽度"截断：长字符串不该把背景矩形推到界外
+        let nb = s.len() as i32;
+        let max_chars = ((self.width as i32 - x) / 8).max(0);
+        let w = nb.min(max_chars).max(0) * 8;
+        if w > 0 {
+            self.fill(x, y, w, 16, bg);
+        }
         self.text(x, y, s, fg);
     }
 
