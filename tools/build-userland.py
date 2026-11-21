@@ -28,12 +28,14 @@ TARGET = "x86_64-unknown-none"
 RUSTFLAGS = " ".join([
     "-C", "link-arg=-Tuser.ld",
     "-C", "link-arg=--build-id=none",
+    # 不让 lld 单独拆只读段：否则会出现一个非页对齐的小 LOAD 段
+    "-C", "link-arg=--no-rosegment",
     "-C", "relocation-model=static",
     "-C", "code-model=small",
 ])
 
 # 用户态要构建哪些程序：名字 → ELF 文件名（与 Cargo.toml 的 [[bin]] 对应）
-BINS = ["lumiwin", "lumidemo", "lumifork"]
+BINS = ["lumiwin", "lumibrowser", "lumidemo", "lumifork"]
 
 
 def main():

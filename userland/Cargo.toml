@@ -12,6 +12,10 @@ name = "liblumi"
 path = "src/lib.rs"
 
 [[bin]]
+name = "lumibrowser"
+path = "src/bin/lumibrowser.rs"
+
+[[bin]]
 name = "lumiwin"
 path = "src/bin/lumiwin.rs"
 

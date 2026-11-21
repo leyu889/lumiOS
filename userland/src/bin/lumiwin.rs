@@ -221,6 +221,12 @@ pub extern "C" fn _start() -> ! {
     // 目录系统：启动就读一次当前目录，文件管理器直接显示真实内容
     fm_refresh(&mut d);
 
+    // 浏览器渲染器先不挂启动路径：加了它之后 lumiwin 的 ELF 从 24 KB
+    // 涨到 64 KB，内核 exec 返回 -8（ENOEXEC）——装载器拒绝了段布局。
+    // 代码保留在这里（因未被引用会被 --gc-sections 回收），
+    // 下一步先查装载器对段数/大小的限制，再接回来。
+    // browse(&mut d);  // 待拆分到独立二进制后再接
+
     out_str(&mut d, "LumiOS shell - type help");
     out_nl(&mut d);
     d.term_line[0] = b'l';
@@ -1022,6 +1028,7 @@ fn fm_paint(d: &mut Desktop) {
         cv.text_bg(34, cv.height as i32 - 22, "UP/DOWN move  ENTER open  BS up", TEXT_DIM, WIN_BG);
     }
 }
+
 
 /// 把窗口内容画进它自己的缓冲。
 ///

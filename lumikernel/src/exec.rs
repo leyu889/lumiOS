@@ -117,10 +117,27 @@ pub fn load_image(pt: &mut PageTable, bytes: &[u8]) -> Result<Loaded, &'static s
 
         let mut va = first_page;
         while va < last_page {
-            let phys = frames::alloc_frame().ok_or("装载 ELF 时物理帧不足")?;
-            // SAFETY: 刚分配的独占帧，经直接映射区清零。
-            unsafe {
-                core::ptr::write_bytes(paging::phys_to_virt(phys) as *mut u8, 0, PAGE as usize)
+            // **相邻段可以共享同一个 4 KiB 页**：ELF 规范只要求
+            // `p_vaddr ≡ p_offset (mod p_align)`，并不要求段按页对齐；
+            // lld 会把 .got 之类的孤儿段紧挨在上一段后面，于是两个段落在同一页。
+            //
+            // 这里以前无条件分配新帧再 map，撞上"这一页已映射"就报错，
+            // 整份 ELF 被判 ENOEXEC（-8）。现象极具误导性：
+            // 24 KB 的程序能跑，31 KB 的跑不了，看起来像"文件太大"。
+            //
+            // 正确做法：已映射就**复用**那一帧，不清零（否则会把前一段
+            // 写进去的内容抹掉），也不再重复 map。
+            let existing = paging::translate_in(pt.root_phys(), va);
+            let phys = match existing {
+                Some(p) => p,
+                None => {
+                    let p = frames::alloc_frame().ok_or("装载 ELF 时物理帧不足")?;
+                    // SAFETY: 刚分配的独占帧，经直接映射区清零。
+                    unsafe {
+                        core::ptr::write_bytes(paging::phys_to_virt(p) as *mut u8, 0, PAGE as usize)
+                    };
+                    p
+                }
             };
 
             // 本页里属于文件内容的部分：[max(va,vaddr), min(va+PAGE, vaddr+filesz))
@@ -141,8 +158,10 @@ pub fn load_image(pt: &mut PageTable, bytes: &[u8]) -> Result<Loaded, &'static s
                 }
             }
 
-            paging::map_in(pt, va, phys, flags_of(seg)).map_err(|_| "用户段映射失败")?;
-            pages += 1;
+            if existing.is_none() {
+                paging::map_in(pt, va, phys, flags_of(seg)).map_err(|_| "用户段映射失败")?;
+                pages += 1;
+            }
             va += PAGE;
         }
     }

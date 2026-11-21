@@ -3078,9 +3078,9 @@ pub extern "C" fn kmain(e820_addr: u32) -> ! {
     // 自检已经全部打印完毕，把屏幕让给窗口服务。这是操作系统的正常终态：
     // 自检是"开机自诊断"，跑完就该进图形界面。
     if have_fb {
-        let argv: Vec<Vec<u8>> = alloc::vec![b"lumiwin".to_vec()];
+        let argv: Vec<Vec<u8>> = alloc::vec![b"lumibrowser".to_vec()];
         let envp: Vec<Vec<u8>> = alloc::vec![b"PATH=/bin".to_vec()];
-        match linux::proc::spawn_program(b"/bin/lumiwin", &argv, &envp) {
+        match linux::proc::spawn_program(b"/bin/lumibrowser", &argv, &envp) {
             Ok(_) => kserialln!("[lumiwin] 桌面已启动"),
             Err(e) => kprintln!("[ !! ] 桌面启动失败：{}", e),
         }

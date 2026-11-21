@@ -71,7 +71,7 @@ def run(cmd):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", default=os.path.join(ROOT, "build"))
-    ap.add_argument("--blocks", type=int, default=16384, help="系统盘块数（1 KiB/块）")
+    ap.add_argument("--blocks", type=int, default=32768, help="系统盘块数（1 KiB/块）")
     ap.add_argument("--data-blocks", type=int, default=2048, help="数据盘块数（1 KiB/块）")
     a = ap.parse_args()
 
@@ -100,7 +100,7 @@ def main():
 
     # LumiOS 用户态程序：由 tools/build-userland.py 构建，存在才收录
     _ub = os.path.join(HERE, "..", "userland", "target", "x86_64-unknown-none", "release")
-    for _name, _guest in [("lumiwin", "bin/lumiwin"), ("lumidemo", "bin/lumidemo")]:
+    for _name, _guest in [("lumiwin", "bin/lumiwin"), ("lumibrowser", "bin/lumibrowser"), ("lumidemo", "bin/lumidemo")]:
         _p = os.path.join(_ub, _name)
         if os.path.isfile(_p):
             extra += ["--file", _guest + "=" + _p]
