@@ -100,7 +100,7 @@ def main():
 
     # LumiOS 用户态程序：由 tools/build-userland.py 构建，存在才收录
     _ub = os.path.join(HERE, "..", "userland", "target", "x86_64-unknown-none", "release")
-    for _name, _guest in [("lumiwin", "bin/lumiwin"), ("lumibrowser", "bin/lumibrowser"), ("lumidemo", "bin/lumidemo")]:
+    for _name, _guest in [("lumiwin", "bin/lumiwin"), ("lumibrowser", "bin/lumibrowser"), ("lumidemo", "bin/lumidemo"), ("lumifork", "bin/lumifork")]:
         _p = os.path.join(_ub, _name)
         if os.path.isfile(_p):
             extra += ["--file", _guest + "=" + _p]

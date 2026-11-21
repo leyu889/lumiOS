@@ -3013,6 +3013,29 @@ pub extern "C" fn kmain(e820_addr: u32) -> ! {
         task::preempt_depth()
     );
 
+    /* ================= 64. 用户态 fork/exec（LumiOS 客户端进程的前提） ================= */
+    // 判定看串口：/bin/lumifork 会打印 "[lumifork] start"、
+    // 子进程打印 "[lumifork] child running"、父进程打印 parent 那行。
+    // 三行都出现 = fork 真的分出了两个执行流。
+    // 退出码回收走的是有 bug 的阻塞等待，所以这里不做回收断言。
+    total += 1;
+    {
+        let argv: Vec<Vec<u8>> = alloc::vec![b"lumifork".to_vec()];
+        let envp: Vec<Vec<u8>> = alloc::vec![b"PATH=/bin".to_vec()];
+        match linux::proc::spawn_program(b"/bin/lumifork", &argv, &envp) {
+            Ok(_) => {
+                for _ in 0..50 {
+                    crate::intr::enable();
+                    crate::intr::frame::halt_once();
+                    crate::intr::disable();
+                }
+                kprintln!("[ OK ] userland: fork/exec 已发起（见上方 lumifork 日志）");
+                ok += 1;
+            }
+            Err(e) => kprintln!("[FAIL] userland: fork 测试程序启动失败 {}", e),
+        }
+    }
+
     /* ================= 63. 用户态图形链路：fb + 字库 + 输入（LumiOS） ================= */
     // 验的是"内核把图形能力真的交到用户态手里了"：用户程序自己 fb_map 拿到全屏、
     // 用共享字库画字、从内核读键盘事件，然后正常退出。
@@ -3078,9 +3101,9 @@ pub extern "C" fn kmain(e820_addr: u32) -> ! {
     // 自检已经全部打印完毕，把屏幕让给窗口服务。这是操作系统的正常终态：
     // 自检是"开机自诊断"，跑完就该进图形界面。
     if have_fb {
-        let argv: Vec<Vec<u8>> = alloc::vec![b"lumibrowser".to_vec()];
+        let argv: Vec<Vec<u8>> = alloc::vec![b"lumiwin".to_vec()];
         let envp: Vec<Vec<u8>> = alloc::vec![b"PATH=/bin".to_vec()];
-        match linux::proc::spawn_program(b"/bin/lumibrowser", &argv, &envp) {
+        match linux::proc::spawn_program(b"/bin/lumiwin", &argv, &envp) {
             Ok(_) => kserialln!("[lumiwin] 桌面已启动"),
             Err(e) => kprintln!("[ !! ] 桌面启动失败：{}", e),
         }
