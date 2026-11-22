@@ -29,6 +29,7 @@ mod font16;
 mod video;
 mod dev;
 mod e820;
+mod netstack;
 mod exec;
 mod fd;
 mod fs;
@@ -3012,6 +3013,35 @@ pub extern "C" fn kmain(e820_addr: u32) -> ! {
         "抢占禁用深度 = {}（必须为 0）",
         task::preempt_depth()
     );
+
+    /* ================= 65. 网络：ARP + ICMP（空中升级第一层） ================= */
+    // net-self-test
+    total += 1;
+    match netstack::init() {
+        Ok(()) => {
+            let (mac, up) = netstack::link();
+            kserialln!(
+                "[net] e1000 初始化完成 mac={:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X} link={}",
+                mac[0], mac[1], mac[2], mac[3], mac[4], mac[5], up
+            );
+            match netstack::arp_resolve(netstack::GATEWAY) {
+                Some(gw_mac) => {
+                    kserialln!(
+                        "[net] ARP 网关 10.0.2.2 -> {:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}",
+                        gw_mac[0], gw_mac[1], gw_mac[2], gw_mac[3], gw_mac[4], gw_mac[5]
+                    );
+                    if netstack::ping(netstack::GATEWAY) {
+                        kprintln!("[ OK ] net: ARP + ICMP ping 10.0.2.2 通");
+                        ok += 1;
+                    } else {
+                        kprintln!("[FAIL] net: ICMP 无回包（ARP 成功，可能被 NAT 丢弃）");
+                    }
+                }
+                None => kprintln!("[FAIL] net: ARP 无应答（网卡未联通或不在 NAT 网段）"),
+            }
+        }
+        Err(e) => kprintln!("[SKIP] net: 没有 e1000 网卡（{}）", e),
+    }
 
     /* ================= 64. 用户态 fork/exec（LumiOS 客户端进程的前提） ================= */
     // 判定看串口：/bin/lumifork 会打印 "[lumifork] start"、
