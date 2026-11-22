@@ -295,6 +295,16 @@ pub fn run_shell(cmd: &str) -> i64 {
     lumi(8, cmd.as_ptr() as u64, cmd.len() as u64)
 }
 
+/// 从升级服务器 GET 一段内容（内核代劳），返回响应长度。
+pub fn http_get(path: &str) -> i64 {
+    lumi(9, path.as_ptr() as u64, path.len() as u64)
+}
+
+/// 把上一步的响应读到用户缓冲，返回实际字节数。
+pub fn http_take(out: &mut [u8]) -> i64 {
+    lumi(10, out.as_mut_ptr() as u64, out.len() as u64)
+}
+
 fn lumi(op: u64, a: u64, b: u64) -> i64 {
     call(SYS_LUMI, op, a, b)
 }

@@ -39,6 +39,9 @@ const OP_SHM_FREE: u64 = 6;
 const OP_MOUSE_READ: u64 = 7;
 /// 在 busybox 里执行一条命令（输出重定向到 /data/.out 由 sh 自己负责）
 const OP_RUN: u64 = 8;
+/// 从升级服务器 HTTP GET 一段内容（a1=路径, a2=路径长, a3=用户缓冲, 容量固定在 2048）
+const OP_HTTP_GET: u64 = 9;
+const OP_HTTP_TAKE: u64 = 10;
 
 /// 帧缓冲在用户态看到的固定地址。
 pub const FB_VA_USER: u64 = 0x7000_0000;
@@ -110,6 +113,110 @@ fn read_user(ptr: u64, out: &mut [u8]) -> Result<(), i64> {
 ///
 /// 为什么不 fork：窗口服务进程里 fork 会让它崩（COW 与共享映射的冲突，已实测）。
 /// 这里直接由内核 spawn 一个子进程，父进程完全不受影响。
+/// 从升级服务器取内容：HTTP/1.0 GET，服务器写死在 10.0.2.2:8080。
+///
+/// 为什么在核心里做：用户态没有 socket 系统调用（只有核心内部的 knet），
+/// 所以这一层由内核代劳，用户态只拿到缓冲区。
+static mut HTTP_BUF: [u8; 2048] = [0; 2048];
+static mut HTTP_LEN: usize = 0;
+
+/// 把最近一次 GET 的响应拷给用户。
+fn http_take(ptr: u64, cap: u64) -> i64 {
+    let n = unsafe { HTTP_LEN };
+    if n == 0 {
+        return 0;
+    }
+    let want = core::cmp::min(n, cap as usize);
+    // SAFETY: 静态缓冲区，长度已限制在缓冲区内
+    let data = unsafe {
+        core::slice::from_raw_parts(core::ptr::addr_of!(HTTP_BUF) as *const u8, want)
+    };
+    if write_user(ptr, data).is_err() {
+        return err(klinux::errno::EFAULT);
+    }
+    want as i64
+}
+
+fn http_get(path_ptr: u64, path_len: u64) -> i64 {
+    const SERVER: [u8; 4] = [10, 0, 2, 2];
+    const PORT: u16 = 8080;
+    const CAP: usize = 2048;
+
+    let mut path = [0u8; 128];
+    let n = core::cmp::min(path_len as usize, 120);
+    if n == 0 || read_user(path_ptr, &mut path[..n]).is_err() {
+        return err(klinux::errno::EFAULT);
+    }
+
+    let port = 41000u16.wrapping_add((crate::task::current_tid() as u16) % 2000);
+    let idx = match crate::net::tcp_alloc(port, SERVER, PORT, false) {
+        Some(i) => i,
+        None => return err(klinux::errno::EAGAIN),
+    };
+    if crate::net::tcp_connect(idx).is_err() {
+        return err(klinux::errno::ECONNREFUSED);
+    }
+    // 等握手
+    for _ in 0..3000 {
+        if let Some((up, _)) = crate::net::tcp_state(idx) {
+            if up {
+                break;
+            }
+        }
+        for _ in 0..2000 {
+            core::hint::spin_loop();
+        }
+    }
+
+    // 组请求：用十进制字节写 CRLF，避免转义在不同工具链里被误解
+    let mut req = [0u8; 192];
+    let mut rl = 0usize;
+    for byte in b"GET ".iter() { req[rl] = *byte; rl += 1; }
+    for i in 0..n { req[rl] = path[i]; rl += 1; }
+    // " HTTP/1.0" + CRLF + CRLF
+    let tail: [u8; 13] = [32, 72, 84, 84, 80, 47, 49, 46, 48, 13, 10, 13, 10];
+    for byte in tail.iter() { req[rl] = *byte; rl += 1; }
+    let _ = crate::net::tcp_send(idx, &req[..rl]);
+
+    // 收响应
+    let mut got = [0u8; CAP];
+    let mut total = 0usize;
+    let mut idle = 0;
+    for _ in 0..8000 {
+        let k = crate::net::tcp_read(idx, &mut got[total..]);
+        if k > 0 {
+            total += k;
+            idle = 0;
+            if total >= CAP {
+                break;
+            }
+        } else {
+            idle += 1;
+            if idle > 800 {
+                break;
+            }
+            for _ in 0..2000 {
+                core::hint::spin_loop();
+            }
+        }
+    }
+    let _ = crate::net::tcp_close(idx);
+
+    if total == 0 {
+        return err(klinux::errno::ETIMEDOUT);
+    }
+    // SAFETY: 系统调用串行执行，长度已限制在 CAP 内
+    unsafe {
+        let dst = core::slice::from_raw_parts_mut(
+            core::ptr::addr_of_mut!(HTTP_BUF) as *mut u8,
+            total,
+        );
+        dst.copy_from_slice(&got[..total]);
+        HTTP_LEN = total;
+    }
+    total as i64
+}
+
 fn run_cmd(ptr: u64, len: u64) -> i64 {
     if len == 0 || len > 900 {
         return err(klinux::errno::EINVAL);
@@ -151,6 +258,8 @@ pub fn dispatch(op: u64, a1: u64, a2: u64, _a3: u64) -> i64 {
         OP_SHM_FREE => shm_free(a1 as usize),
         OP_MOUSE_READ => mouse_read(),
         OP_RUN => run_cmd(a1, a2),
+        OP_HTTP_GET => http_get(a1, a2),
+        OP_HTTP_TAKE => http_take(a1, a2),
         _ => err(klinux::errno::EINVAL),
     }
 }

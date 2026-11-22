@@ -990,6 +990,7 @@ fn is_builtin(cmd: &str) -> bool {
             | "rm" | "echo" | "dir" | "type" | "del" | "cls" | "copy" | "ubuntu" | "windows"
             | "ver" | "vol" | "set" | "where" | "tree" | "more" | "md" | "mkdir" | "rd"
             | "ren" | "move" | "exit" | "prompt" | "title" | "date" | "time" | "attrib"
+            | "update-lumios"
     )
 }
 
@@ -1147,6 +1148,36 @@ fn term_run(d: &mut Desktop) {
             write_num(d, dirs as u64);
             out_str(d, " Dir(s)");
             out_nl(d);
+        }
+        "update-lumios" => {
+            // 与升级服务器（10.0.2.2:8080）握手：先取版本号，再决定是否下载
+            out_str(d, "connecting to update server 10.0.2.2:8080 ...");
+            out_nl(d);
+            let n = http_get("/version");
+            if n <= 0 {
+                out_str(d, "update server unreachable");
+                out_nl(d);
+                out_str(d, "check: port forward 8080 + tools/update-server.py on host");
+                out_nl(d);
+            } else {
+                let mut buf = [0u8; 512];
+                let k = http_take(&mut buf).max(0) as usize;
+                out_str(d, "server says: ");
+                for i in 0..k {
+                    let b = buf[i];
+                    if b == 10 || b == 13 {
+                        if i + 1 == k || buf[i + 1] != 10 {
+                            out_nl(d);
+                        }
+                    } else if b >= 0x20 {
+                        if d.term_n < d.term_text.len() - 1 {
+                            d.term_text[d.term_n] = b;
+                            d.term_n += 1;
+                        }
+                    }
+                }
+                out_nl(d);
+            }
         }
         "ver" => {
             out_str(d, "LumiOS [Version 0.1.26011]");
