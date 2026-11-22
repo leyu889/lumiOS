@@ -959,6 +959,15 @@ fn copy_file(from: &str, to: &str) -> Result<usize, i64> {
     Ok(n)
 }
 
+/// 哪些命令由 LumiOS 自己实现（其余转 busybox）。
+fn is_builtin(cmd: &str) -> bool {
+    matches!(
+        cmd,
+        "" | "help" | "clear" | "version" | "ls" | "cat" | "head" | "wc" | "pwd" | "cd"
+            | "rm" | "echo" | "dir" | "type" | "del" | "cls" | "copy" | "ubuntu" | "windows"
+    )
+}
+
 fn term_run(d: &mut Desktop) {
     // 先把命令行拷到本地：后面要 &mut d 输出，不能再借着 d 的不可变引用
     let mut lbuf = [0u8; 64];
@@ -991,7 +1000,10 @@ fn term_run(d: &mut Desktop) {
     }
 
     // ---- Ubuntu 模式：交给 busybox，输出经 /data/.out 取回 ----
-    if d.term_mode == 1 && !cmdline.is_empty() {
+    // 内建命令之外，一律交给 busybox（默认就有 ~300 个命令）。
+    // 之前把这套逻辑抽成函数后整个桌面起不来，所以这里**只改判断条件**，
+    // 执行逻辑保持原样，改动面最小。
+    if !cmdline.is_empty() && (d.term_mode == 1 || !is_builtin(cmd)) {
         let mut full = [0u8; 512];
         let mut n = 0usize;
         for b in cmdline.bytes() {
