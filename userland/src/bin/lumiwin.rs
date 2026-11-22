@@ -521,7 +521,7 @@ fn browser_chrome(c: &Canvas, d: &Desktop) {
     let cy = y + 68;
     c.fill(x, cy, cw, w.h - TITLE_H - 68, 0x00FF_FFFF);
     // 按窗口宽度截断，别让文字顶到窗口外（之前溢出到隔壁窗口）
-    let max_chars = ((cw - 48) / 12).max(1) as usize;
+    let max_chars = ((cw - 48) / 6).max(1) as usize;
     let l1 = "Page content area";
     let l2 = "(type a URL above, ENTER to load)";
     c.text_bg(x + 24, cy + 24, &l1[..l1.len().min(max_chars)], 0x0070_767C, 0x00FF_FFFF);
@@ -960,11 +960,36 @@ fn copy_file(from: &str, to: &str) -> Result<usize, i64> {
 }
 
 /// 哪些命令由 LumiOS 自己实现（其余转 busybox）。
+/// 往终端写一个十进制数（没 alloc，手工转）。
+fn write_num(d: &mut Desktop, mut v: u64) {
+    let mut tmp = [0u8; 20];
+    let mut n = 0usize;
+    if v == 0 {
+        out_str(d, "0");
+        return;
+    }
+    while v > 0 {
+        tmp[n] = b'0' + (v % 10) as u8;
+        v /= 10;
+        n += 1;
+    }
+    while n > 0 {
+        n -= 1;
+        let b = tmp[n];
+        if d.term_n < d.term_text.len() - 1 {
+            d.term_text[d.term_n] = b;
+            d.term_n += 1;
+        }
+    }
+}
+
 fn is_builtin(cmd: &str) -> bool {
     matches!(
         cmd,
         "" | "help" | "clear" | "version" | "ls" | "cat" | "head" | "wc" | "pwd" | "cd"
             | "rm" | "echo" | "dir" | "type" | "del" | "cls" | "copy" | "ubuntu" | "windows"
+            | "ver" | "vol" | "set" | "where" | "tree" | "more" | "md" | "mkdir" | "rd"
+            | "ren" | "move" | "exit" | "prompt" | "title" | "date" | "time" | "attrib"
     )
 }
 
@@ -1085,14 +1110,139 @@ fn term_run(d: &mut Desktop) {
     match cmd {
         "" => {}
         "dir" => {
-            // dir 等价 ls
+            // 按 Windows 的 dir 版式输出：卷标 + 目录头 + 明细 + 统计
+            out_str(d, " Volume in drive L has no label.");
+            out_nl(d);
+            out_str(d, " Directory of /data");
+            out_nl(d);
+            out_nl(d);
             let mut ents = [DirEnt { name: [0; 32], len: 0, is_dir: false }; DIR_MAX];
-            let n = readdir(if arg.is_empty() { "." } else { arg }, &mut ents);
-            for i in 0..n.max(0) as usize {
-                out_str(d, ents[i].as_str());
-                out_str(d, "  ");
+            let n = readdir(if arg.is_empty() { "." } else { arg }, &mut ents).max(0) as usize;
+            let mut files = 0usize;
+            let mut dirs = 0usize;
+            let mut bytes = 0u64;
+            for i in 0..n {
+                let e = ents[i];
+                if e.is_dir {
+                    dirs += 1;
+                    out_str(d, "                <DIR>          ");
+                } else {
+                    files += 1;
+                    bytes += e.len as u64;
+                    // 右对齐宽度作用有限，用空格分隔即可读
+                    out_str(d, "                ");
+                    write_num(d, e.len as u64);
+                    out_str(d, " ");
+                }
+                out_str(d, e.as_str());
+                out_nl(d);
+            }
+            out_str(d, "        ");
+            write_num(d, files as u64);
+            out_str(d, " File(s) ");
+            write_num(d, bytes);
+            out_str(d, " bytes");
+            out_nl(d);
+            out_str(d, "        ");
+            write_num(d, dirs as u64);
+            out_str(d, " Dir(s)");
+            out_nl(d);
+        }
+        "ver" => {
+            out_str(d, "LumiOS [Version 0.1.26011]");
+            out_nl(d);
+        }
+        "vol" => {
+            out_str(d, " Volume in drive L is LUMIOS");
+            out_nl(d);
+            out_str(d, " Volume Serial Number is 4C55-4D49");
+            out_nl(d);
+        }
+        "set" => {
+            out_str(d, "PATH=/bin");
+            out_nl(d);
+            out_str(d, "HOME=/");
+            out_nl(d);
+            out_str(d, "OS=LumiOS");
+            out_nl(d);
+            out_str(d, "SHELL=/bin/lumiwin");
+            out_nl(d);
+        }
+        "where" => {
+            if arg.is_empty() {
+                out_str(d, "ERROR: Invalid syntax. where <command>");
+            } else if is_builtin(arg) {
+                out_str(d, "(builtin) ");
+                out_str(d, arg);
+            } else {
+                out_str(d, "/bin/");
+                out_str(d, arg);
             }
             out_nl(d);
+        }
+        "tree" => {
+            let mut ents = [DirEnt { name: [0; 32], len: 0, is_dir: false }; DIR_MAX];
+            let n = readdir(".", &mut ents).max(0) as usize;
+            out_str(d, "/data");
+            out_nl(d);
+            for i in 0..n {
+                let last = i + 1 == n;
+                out_str(d, if last { "`-- " } else { "|-- " });
+                out_str(d, ents[i].as_str());
+                out_nl(d);
+            }
+        }
+        "more" => {
+            // 一屏显示，不做分页（终端可滚动之前意义不大）
+            let fd = open(arg, O_RDONLY);
+            if fd < 0 {
+                out_str(d, "Cannot access file.");
+                out_nl(d);
+            } else {
+                let mut buf = [0u8; 256];
+                loop {
+                    let k = read(fd, &mut buf);
+                    if k <= 0 {
+                        break;
+                    }
+                    for i in 0..k as usize {
+                        let b = buf[i];
+                        if b == 10 {
+                            out_nl(d);
+                        } else if b >= 0x20 && d.term_n < d.term_text.len() - 1 {
+                            d.term_text[d.term_n] = b;
+                            d.term_n += 1;
+                        }
+                    }
+                }
+                close(fd);
+                out_nl(d);
+            }
+        }
+        "md" | "mkdir" | "rd" | "ren" | "move" => {
+            // 诚实提示：LumiFS 是扁平文件系统，没有目录创建与改名
+            out_str(d, cmd);
+            out_str(d, ": LumiFS 是扁平文件系统，暂不支持该操作");
+            out_nl(d);
+        }
+        "attrib" => {
+            let mut ents = [DirEnt { name: [0; 32], len: 0, is_dir: false }; DIR_MAX];
+            let n = readdir(".", &mut ents).max(0) as usize;
+            for i in 0..n {
+                out_str(d, if ents[i].is_dir { "D" } else { "A" });
+                out_str(d, "       /data/");
+                out_str(d, ents[i].as_str());
+                out_nl(d);
+            }
+        }
+        "date" | "time" => {
+            out_str(d, "RTC 尚未接入，当前无系统时间");
+            out_nl(d);
+        }
+        "prompt" | "title" => {}
+        "exit" => {
+            d.wins[1].visible = false;
+            d.dirty = true;
         }
         "type" => {
             let fd = open(arg, O_RDONLY);
@@ -1335,7 +1485,7 @@ fn repaint_term(d: &mut Desktop) {
         let mut y = 34;
         for i in first..n {
             // 按窗口宽度截断：长行不能顶出窗口边框（以前会压到隔壁窗口）
-            let maxc = (((cv.width as i32) - 40) / 12).max(1) as usize;
+            let maxc = (((cv.width as i32) - 40) / 6).max(1) as usize;
             let n = lens[i].min(maxc);
             let s = unsafe {
                 core::str::from_utf8_unchecked(&text[starts[i]..starts[i] + n])
@@ -1343,7 +1493,7 @@ fn repaint_term(d: &mut Desktop) {
             cv.text_bg(34, y, s, TEXT_DK, 0x00FC_FCFC);
             y += 16;
         }
-        let maxc = (((cv.width as i32) - 56) / 12).max(1) as usize;
+        let maxc = (((cv.width as i32) - 56) / 6).max(1) as usize;
         let ln = d.term_len.min(maxc);
         let line = unsafe { core::str::from_utf8_unchecked(&d.term_line[..ln]) };
         cv.text_bg(34, y + 2, ">", 0x00E9_5454, 0x00FC_FCFC);
@@ -1518,7 +1668,7 @@ fn fm_paint(d: &mut Desktop) {
         let col = if sel { 0x00C0_3A_33 } else { 0x0024_2424 };
         let bg = if sel { 0x00FC_EA_E9 } else { 0x00FF_FFFF };
         // 文件名按剩余宽度截断，别顶出窗口
-        let room = (((cw - list_x - 40) / 12).max(1)) as usize;
+        let room = (((cw - list_x - 40) / 6).max(1)) as usize;
         let nm = e.as_str();
         let nm = &nm[..nm.len().min(room)];
         cv.text_bg(list_x + 26, y, nm, col, bg);
