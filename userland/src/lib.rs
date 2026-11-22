@@ -290,6 +290,11 @@ pub fn input_read() -> Option<KeyEvent> {
 /// 之前把子操作塞进系统调用号的高位是错的——内核只看 rax，看到的是一个
 /// 天文数字，直接 EINVAL。
 #[inline(always)]
+/// 用 busybox 执行一条 shell 命令（由内核 spawn，不打搅当前进程）。
+pub fn run_shell(cmd: &str) -> i64 {
+    lumi(8, cmd.as_ptr() as u64, cmd.len() as u64)
+}
+
 fn lumi(op: u64, a: u64, b: u64) -> i64 {
     call(SYS_LUMI, op, a, b)
 }

@@ -37,6 +37,8 @@ const OP_SHM_ALLOC: u64 = 4;
 const OP_SHM_MAP: u64 = 5;
 const OP_SHM_FREE: u64 = 6;
 const OP_MOUSE_READ: u64 = 7;
+/// 在 busybox 里执行一条命令（输出重定向到 /data/.out 由 sh 自己负责）
+const OP_RUN: u64 = 8;
 
 /// 帧缓冲在用户态看到的固定地址。
 pub const FB_VA_USER: u64 = 0x7000_0000;
@@ -79,6 +81,62 @@ fn err(e: i64) -> i64 {
 }
 
 /// 把字节块写到用户地址（用 uaccess，避免用户传坏指针把内核带崩）。
+/// 从用户地址读一段数据（读用户内存，逐页翻译）。
+fn read_user(ptr: u64, out: &mut [u8]) -> Result<(), i64> {
+    let mut off = 0usize;
+    while off < out.len() {
+        let va = ptr + off as u64;
+        let page = va & !0xFFF;
+        let phys = match crate::paging::translate_in(crate::task::current_pml4(), page) {
+            Some(p) => p,
+            None => return Err(err(klinux::errno::EFAULT)),
+        };
+        let in_page = (va - page) as usize;
+        let n = core::cmp::min(4096 - in_page, out.len() - off);
+        // SAFETY: 物理页经直接映射区可访问，范围在单页内
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                (crate::paging::phys_to_virt(phys) as *const u8).add(in_page),
+                out.as_mut_ptr().add(off),
+                n,
+            );
+        }
+        off += n;
+    }
+    Ok(())
+}
+
+/// 用 busybox 的 sh 执行一条命令。
+///
+/// 为什么不 fork：窗口服务进程里 fork 会让它崩（COW 与共享映射的冲突，已实测）。
+/// 这里直接由内核 spawn 一个子进程，父进程完全不受影响。
+fn run_cmd(ptr: u64, len: u64) -> i64 {
+    if len == 0 || len > 900 {
+        return err(klinux::errno::EINVAL);
+    }
+    let mut buf = [0u8; 1024];
+    let n = len as usize;
+    if read_user(ptr, &mut buf[..n]).is_err() {
+        return err(klinux::errno::EFAULT);
+    }
+    let argv: alloc::vec::Vec<alloc::vec::Vec<u8>> = alloc::vec![
+        b"busybox".to_vec(),
+        b"sh".to_vec(),
+        b"-c".to_vec(),
+        buf[..n].to_vec(),
+    ];
+    let envp: alloc::vec::Vec<alloc::vec::Vec<u8>> = alloc::vec![b"PATH=/bin".to_vec()];
+    // **静音控制台**：子进程的 stdout 会重定向到 /data/.out，
+    // 但如果它往 stderr 或直接往控制台写，就会盖住整个桌面（实际发生过）。
+    crate::console::set_mute(true);
+    let r = match crate::linux::proc::spawn_program(b"/bin/busybox", &argv, &envp) {
+        Ok(_) => 0,
+        Err(e) => e,
+    };
+    crate::console::set_mute(false);
+    r
+}
+
 fn write_user(ptr: u64, data: &[u8]) -> Result<(), i64> {
     crate::linux::uaccess::copy_out(ptr, data).map_err(|_| klinux::errno::EFAULT)
 }
@@ -92,6 +150,7 @@ pub fn dispatch(op: u64, a1: u64, a2: u64, _a3: u64) -> i64 {
         OP_SHM_MAP => shm_map(a1 as usize),
         OP_SHM_FREE => shm_free(a1 as usize),
         OP_MOUSE_READ => mouse_read(),
+        OP_RUN => run_cmd(a1, a2),
         _ => err(klinux::errno::EINVAL),
     }
 }
