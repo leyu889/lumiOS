@@ -25,7 +25,7 @@ mod arch;
 mod boot;
 #[macro_use]
 mod console;
-mod font8x16;
+mod font16;
 mod video;
 mod dev;
 mod e820;
@@ -3103,6 +3103,16 @@ pub extern "C" fn kmain(e820_addr: u32) -> ! {
     if have_fb {
         let argv: Vec<Vec<u8>> = alloc::vec![b"lumiwin".to_vec()];
         let envp: Vec<Vec<u8>> = alloc::vec![b"PATH=/bin".to_vec()];
+        // 先起浏览器客户端，让它把共享缓冲和握手文件准备好，
+        // 再起窗口服务（服务端会去读那个文件）。
+        {
+            let argv_b: Vec<Vec<u8>> = alloc::vec![b"lumibrowser".to_vec()];
+            let envp_b: Vec<Vec<u8>> = alloc::vec![b"PATH=/bin".to_vec()];
+            match linux::proc::spawn_program(b"/bin/lumibrowser", &argv_b, &envp_b) {
+                Ok(_) => kserialln!("[lumi] 浏览器客户端已启动"),
+                Err(e) => kprintln!("[ !! ] 浏览器启动失败：{}", e),
+            }
+        }
         match linux::proc::spawn_program(b"/bin/lumiwin", &argv, &envp) {
             Ok(_) => kserialln!("[lumiwin] 桌面已启动"),
             Err(e) => kprintln!("[ !! ] 桌面启动失败：{}", e),

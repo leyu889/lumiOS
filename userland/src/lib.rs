@@ -403,9 +403,16 @@ impl Canvas {
         if x1 <= x0 || y1 <= y0 {
             return;
         }
+        // **按行整块写**，不再逐像素调用 put。
+        // put 每点都要判一次边界、做一次 volatile 写；整屏 78 万点就是 78 万次判断。
+        // 这里每行只算一次指针、一次长度，然后交给 slice::fill（会被优化成宽写）。
+        let n = (x1 - x0) as usize;
         for yy in y0..y1 {
-            for xx in x0..x1 {
-                self.put(xx, yy, color);
+            let off = (yy as u32 * self.pitch / 4 + x0 as u32) as isize;
+            // SAFETY: [x0,x1) 与 [y0,y1) 已钳在画布内，整行连续可写。
+            unsafe {
+                let p = self.ptr.offset(off) as *mut u32;
+                core::slice::from_raw_parts_mut(p, n).fill(color);
             }
         }
     }
@@ -424,8 +431,8 @@ impl Canvas {
             if *bits == 0 {
                 continue;
             }
-            for dx in 0..8u32 {
-                if bits & (0x80 >> dx) != 0 {
+            for dx in 0..font::CELL_W {
+                if bits & (1u16 << (font::CELL_W - 1 - dx)) != 0 {
                     self.put(x + dx as i32, y + dy as i32, color);
                 }
             }
@@ -436,7 +443,7 @@ impl Canvas {
         let mut cx = x;
         for b in s.bytes() {
             self.glyph(cx, y, b, color);
-            cx += 8;
+            cx += font::CELL_W as i32;
         }
     }
 
@@ -444,22 +451,36 @@ impl Canvas {
     pub fn text_bg(&self, x: i32, y: i32, s: &str, fg: u32, bg: u32) {
         // 宽度按"画布剩余宽度"截断：长字符串不该把背景矩形推到界外
         let nb = s.len() as i32;
-        let max_chars = ((self.width as i32 - x) / 8).max(0);
-        let w = nb.min(max_chars).max(0) * 8;
+        let max_chars = ((self.width as i32 - x) / font::CELL_W as i32).max(0);
+        let w = nb.min(max_chars).max(0) * font::CELL_W as i32;
         if w > 0 {
-            self.fill(x, y, w, 16, bg);
+            self.fill(x, y, w, font::CELL_H as i32, bg);
         }
         self.text(x, y, s, fg);
     }
 
     /// 把另一块画布的内容贴到 (dx, dy)。窗口服务合成时用。
+    /// 整块贴图。按行 `copy_nonoverlapping`，比逐像素快一个数量级。
     pub fn blit(&self, src: &Canvas, dx: i32, dy: i32) {
-        for y in 0..src.height as i32 {
-            for x in 0..src.width as i32 {
-                let off = (y as u32 * src.pitch / 4 + x as u32) as isize;
-                // SAFETY: 源画布内部偏移在界内。
-                let c = unsafe { core::ptr::read_volatile(src.ptr.offset(off)) };
-                self.put(dx + x, dy + y, c);
+        // 目标矩形先钳一次，避免每行重复判断
+        let x0 = dx.max(0);
+        let y0 = dy.max(0);
+        let x1 = (dx + src.width as i32).min(self.width as i32);
+        let y1 = (dy + src.height as i32).min(self.height as i32);
+        if x1 <= x0 || y1 <= y0 {
+            return;
+        }
+        let n = (x1 - x0) as usize;
+        for yy in y0..y1 {
+            let sx = (x0 - dx) as usize;
+            let sy = (yy - dy) as usize;
+            let soff = (sy as u32 * src.pitch / 4) as isize + sx as isize;
+            let doff = (yy as u32 * self.pitch / 4) as isize + x0 as isize;
+            // SAFETY: 源偏移在源画布内（sx/sy 由钳制推出），目标同理。
+            unsafe {
+                let sp = src.ptr.offset(soff);
+                let dp = self.ptr.offset(doff) as *mut u32;
+                core::ptr::copy_nonoverlapping(sp, dp, n);
             }
         }
     }
@@ -467,7 +488,7 @@ impl Canvas {
 
 /// 与内核共用同一份字库文件——两边字形必须一致，否则控制台和 GUI 的
 /// 字看起来是两种风格。
-#[path = "../../lumikernel/src/font8x16.rs"]
+#[path = "../../lumikernel/src/font16.rs"]
 pub mod font;
 
 /* ============================= 分配器 ============================= */

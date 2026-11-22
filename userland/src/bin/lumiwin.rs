@@ -30,19 +30,21 @@ use liblumi::*;
 /* ---------------- 配色 ---------------- */
 const WALL_TOP: u32 = 0x001A_2740;
 const WALL_BOTTOM: u32 = 0x000B_1119;
-const TITLE_FOCUS: u32 = 0x002B_4A7A;
-const TITLE_IDLE: u32 = 0x001C_2431;
-const WIN_BG: u32 = 0x0014_1B26;
-const WIN_BORDER: u32 = 0x003A_4A63;
+const TITLE_FOCUS: u32 = 0x00F3_F4F6; // 浅色标题栏（聚焦）
+const TITLE_IDLE: u32 = 0x00F8_F9FA; // 浅色标题栏（非聚焦）
+const WIN_BG: u32 = 0x00FF_FFFF; // 纯白内容区
+const WIN_BORDER: u32 = 0x00D5_D9DE; // 发丝级边框
+const TEXT_DK: u32 = 0x0024_2424; // 浅底深字
+/// 深底/彩色底上的浅色文字（标题栏、桌面图标标签）
 const TEXT: u32 = 0x00E6_E8EC;
 const TEXT_DIM: u32 = 0x0087_94A8;
 const ACCENT: u32 = 0x004C_9AFF;
 const OK: u32 = 0x003F_C46A;
-const CLOSE: u32 = 0x00E0_5A5A;
+const CLOSE: u32 = 0x00FF_5F_57; // mac 风格红点
 const CURSOR_FG: u32 = 0x00FF_FFFF;
 const CURSOR_BG: u32 = 0x0010_1010;
 
-const TITLE_H: i32 = 28;
+const TITLE_H: i32 = 34;
 const WIN_MIN_W: i32 = 260;
 const WIN_MIN_H: i32 = 120;
 
@@ -83,6 +85,13 @@ struct Desktop {
     fm_entries: [DirEnt; DIR_MAX],
     fm_n: usize,
     fm_sel: usize,
+    /// 上次点击的行（简易双击判定）
+    fm_last_click: usize,
+    /// 浏览器地址栏内容
+    url: [u8; 96],
+    url_len: usize,
+    /// 是否已接入浏览器客户端缓冲
+    browser_adopted: bool,
     /// 终端输出（字节流，按换行分行绘制）
     term_text: [u8; 2048],
     term_n: usize,
@@ -92,10 +101,10 @@ impl Desktop {
     fn new(w: i32, h: i32) -> Self {
         let wins = [
             Win {
-                x: 150,
-                y: 110,
-                w: 520,
-                h: 320,
+                x: 16,
+                y: 128,
+                w: 330,
+                h: 430,
                 title: "File Manager",
                 body: "F1  ·  待接入客户端",
                 color: 0x00B8_8A4A,
@@ -103,10 +112,10 @@ impl Desktop {
                 canvas: None,
             },
             Win {
-                x: 300,
-                y: 200,
-                w: 560,
-                h: 320,
+                x: 356,
+                y: 150,
+                w: 330,
+                h: 430,
                 title: "Terminal",
                 body: "F2  ·  待接入客户端",
                 color: 0x003F_C46A,
@@ -114,10 +123,10 @@ impl Desktop {
                 canvas: None,
             },
             Win {
-                x: 420,
-                y: 300,
-                w: 480,
-                h: 280,
+                x: 696,
+                y: 172,
+                w: 312,
+                h: 400,
                 title: "Browser",
                 body: "F3  ·  待接入客户端",
                 color: 0x004C_9AFF,
@@ -141,6 +150,10 @@ impl Desktop {
             fm_entries: [DirEnt { name: [0; 32], len: 0, is_dir: false }; DIR_MAX],
             fm_n: 0,
             fm_sel: 0,
+            fm_last_click: usize::MAX,
+            url: [0; 96],
+            url_len: 0,
+            browser_adopted: false,
             term_text: [0; 2048],
             term_n: 0,
         }
@@ -218,14 +231,23 @@ pub extern "C" fn _start() -> ! {
 
     // **必须放在缓冲分配之后**：repaint_term 要靠 wins[1].canvas 才画得出来。
     // 上一版插在分配之前，canvas 还是 None，于是启动后屏幕上仍是占位内容。
-    // 目录系统：启动就读一次当前目录，文件管理器直接显示真实内容
-    fm_refresh(&mut d);
+    // 客户端进程接线暂缓：上次把 fork+execve 放进窗口服务进程后，
+    // lumiwin 启动即崩（内核打了缺页现场）。已确认 fork 本身可用
+    // （自检 64 通过），问题出在"窗口服务进程里 fork"或 argv 构造。
+    // 先把桌面恢复到稳定状态，再用最小改动重做。
+    // 目录系统：先切到 /data —— 根目录在 LumiFS 里是空的，
+    // 数据文件都在 /data，不切过去文件管理器就是一页空白。
+    chdir("/data");
 
     // 浏览器渲染器先不挂启动路径：加了它之后 lumiwin 的 ELF 从 24 KB
     // 涨到 64 KB，内核 exec 返回 -8（ENOEXEC）——装载器拒绝了段布局。
     // 代码保留在这里（因未被引用会被 --gc-sections 回收），
     // 下一步先查装载器对段数/大小的限制，再接回来。
     // browse(&mut d);  // 待拆分到独立二进制后再接
+
+    // **必须在窗口缓冲分配之后**：fm_paint 要靠 wins[0].canvas 才画得出来，
+    // 先画会被随后的 paint_body 占位内容盖掉（这个坑踩过两次）。
+    fm_refresh(&mut d);
 
     out_str(&mut d, "LumiOS shell - type help");
     out_nl(&mut d);
@@ -269,6 +291,31 @@ pub extern "C" fn _start() -> ! {
                             d.dragging = true;
                             d.drag_dx = d.mx;
                             d.drag_dy = d.my;
+                        } else if wi == 0 {
+                            // 文件管理器：点行就选中（以前只有键盘能选）
+                            let lx = w.x + 162;   // 列表起点（侧栏 150 + 12）
+                            let ly = w.y + TITLE_H + 44;
+                            if d.mx >= lx && d.my >= ly {
+                                let row = ((d.my - ly) / 34) as usize;
+                                let visible = ((w.h - TITLE_H - 60) / 34).max(1) as usize;
+                                let first = if d.fm_sel >= visible { d.fm_sel + 1 - visible } else { 0 };
+                                let idx = first + row;
+                                if idx < d.fm_n {
+                                    d.fm_sel = idx;
+                                    // 再点一次同一行 = 打开（简化版双击）
+                                    if d.fm_last_click == idx {
+                                        if d.fm_entries[idx].is_dir {
+                                            let name = d.fm_entries[idx].as_str();
+                                            if chdir(name) == 0 {
+                                                d.fm_sel = 0;
+                                                fm_refresh(&mut d);
+                                            }
+                                        }
+                                    }
+                                    d.fm_last_click = idx;
+                                    fm_paint(&mut d);
+                                }
+                            }
                         }
                     }
                 }
@@ -282,6 +329,44 @@ pub extern "C" fn _start() -> ! {
             if !k.pressed {
                 continue;
             }
+
+            // **先处理可打印字符**，不走 match。
+            // 之前放在 match 的守卫/兜底分支里，实测 `[k] press` 有输出但
+            // 字符分支从不执行（原因未查明）。用 if 提到前面，行为确定。
+            if k.code >= 0x20 && k.code < 0x7F {
+                let ch = k.code;
+                if d.focus == 2 {
+                    if d.url_len < d.url.len() - 1 {
+                        d.url[d.url_len] = ch;
+                        d.url_len += 1;
+                        d.dirty = true;
+                    }
+                } else if d.term_len < d.term_line.len() - 1 {
+                    d.term_line[d.term_len] = ch;
+                    d.term_len += 1;
+                    d.dirty = true;
+                    repaint_term(&mut d);
+                }
+                continue;
+            }
+
+            // 回车：**必须在 match 之前处理**。
+            // 之前的实现依赖 match 里的一条 KEY_ENTER 分支，那条分支后来被误删，
+            // 结果是"回车完全没反应"——而串口里事件明明已经被取走了。
+            if k.code == KEY_ENTER {
+                term_run(&mut d);
+                continue;
+            }
+            // 退格同理，单独拦下
+            if k.code == KEY_BACKSPACE {
+                if d.term_len > 0 {
+                    d.term_len -= 1;
+                    d.dirty = true;
+                    repaint_term(&mut d);
+                }
+                continue;
+            }
+
             match k.code {
                 KEY_F1 => open_app(&mut d, 0),
                 KEY_F2 => open_app(&mut d, 1),
@@ -313,34 +398,50 @@ pub extern "C" fn _start() -> ! {
                         fm_paint(&mut d);
                     }
                 }
-                KEY_ENTER if d.focus == 0 => {
-                    // 文件管理器里回车 = 进入选中的目录（文件暂不支持打开）
-                    if d.fm_sel < d.fm_n && d.fm_entries[d.fm_sel].is_dir {
-                        let name = d.fm_entries[d.fm_sel].as_str();
-                        if chdir(name) == 0 {
-                            d.fm_sel = 0;
-                            fm_refresh(&mut d);
-                        }
+                // 回车不再给文件管理器：进目录用鼠标双击。
+                // 之前这条分支会把回车截走（fm_sel 有值时），终端因此永远执行不了命令。
+                KEY_BACKSPACE if d.focus == 2 => {
+                    if d.url_len > 0 {
+                        d.url_len -= 1;
+                        d.dirty = true;
                     }
                 }
-                KEY_ENTER => term_run(&mut d),
                 KEY_BACKSPACE => {
                     if d.term_len > 0 {
                         d.term_len -= 1;
                         d.dirty = true;
-                    }
-                }
-                c if (0x20..0x7F).contains(&c) => {
-                    if d.term_len < d.term_line.len() - 1 {
-                        d.term_line[d.term_len] = c;
-                        d.term_len += 1;
-                        d.dirty = true;
                         repaint_term(&mut d);
                     }
                 }
-                _ => {}
+                // 字符输入按**焦点窗口**路由：以前所有字符都灌进终端，
+                // 而终端被浏览器窗口盖住，看起来就是"打不了字"。
+                // 字符输入放兜底分支里手工判范围。
+                // 原先写成 `c if (0x20..0x7F).contains(&c) => ...` 的守卫分支，
+                // 实测按键到了（press 有日志）却进不来（char 无日志）——
+                // 与其和 match 的匹配规则较劲，不如把判断写在分支体里。
+                _ => {
+                    let c = k.code;
+                    if c >= 0x20 && c < 0x7F {
+                        if d.focus == 2 {
+                            if d.url_len < d.url.len() - 1 {
+                                d.url[d.url_len] = c;
+                                d.url_len += 1;
+                                d.dirty = true;
+                            }
+                        } else if d.term_len < d.term_line.len() - 1 {
+                            d.term_line[d.term_len] = c;
+                            d.term_len += 1;
+                            d.dirty = true;
+                            repaint_term(&mut d);
+                        }
+                            }
+                }
             }
         }
+
+        // 客户端接入暂时关掉：接入后窗口整片消失（blit 源未就绪时没有兜底）。
+        // 先把三个窗口恢复，等客户端路径做稳再开。
+        // adopt_browser(&mut d);
 
         if d.dirty || moved {
             draw_all(&c, &d);
@@ -374,7 +475,47 @@ fn draw_all(c: &Canvas, d: &Desktop) {
 
     // 按用户要求：不要任务栏。窗口自己带标题栏就够了，
     // 少一条常驻横条 = 多 28 px 可用区域，也更符合"极简"的定位。
+    // 浏览器窗口的 Chrome 风格外壳：标签条 + 地址栏
+    if d.wins[2].visible {
+        browser_chrome(c, d);
+    }
+
     draw_cursor(c, d.mx, d.my);
+}
+
+/// 画 Chrome 风格的浏览器外壳：顶部标签条、地址栏、内容区。
+fn browser_chrome(c: &Canvas, d: &Desktop) {
+    let w = d.wins[2];
+    let x = w.x;
+    let y = w.y + TITLE_H;
+    let cw = w.w;
+
+    // 标签条
+    c.fill(x, y, cw, 30, 0x00DE_E1E6);
+    c.fill(x + 8, y + 6, 150, 24, 0x00FF_FFFF);
+    c.text_bg(x + 18, y + 10, "New Tab", 0x003C_4044, 0x00FF_FFFF);
+
+    // 地址栏
+    c.fill(x, y + 30, cw, 38, 0x00F1_F3F4);
+    c.fill(x + 10, y + 38, cw - 20, 24, 0x00FF_FFFF);
+    c.fill(x + 10, y + 38, cw - 20, 1, 0x00C4_C7C9);
+    c.fill(x + 10, y + 61, cw - 20, 1, 0x00C4_C7C9);
+    let url = unsafe { core::str::from_utf8_unchecked(&d.url[..d.url_len]) };
+    if url.is_empty() {
+        c.text_bg(x + 20, y + 42, "Search or type a URL", 0x0080_868C, 0x00FF_FFFF);
+    } else {
+        c.text_bg(x + 20, y + 42, url, 0x0020_2124, 0x00FF_FFFF);
+    }
+
+    // 内容区
+    let cy = y + 68;
+    c.fill(x, cy, cw, w.h - TITLE_H - 68, 0x00FF_FFFF);
+    // 按窗口宽度截断，别让文字顶到窗口外（之前溢出到隔壁窗口）
+    let max_chars = ((cw - 48) / 12).max(1) as usize;
+    let l1 = "Page content area";
+    let l2 = "(type a URL above, ENTER to load)";
+    c.text_bg(x + 24, cy + 24, &l1[..l1.len().min(max_chars)], 0x0070_767C, 0x00FF_FFFF);
+    c.text_bg(x + 24, cy + 44, &l2[..l2.len().min(max_chars)], 0x0090_969C, 0x00FF_FFFF);
 }
 
 fn wallpaper(c: &Canvas) {
@@ -414,18 +555,37 @@ fn draw_icons(c: &Canvas) {
 }
 
 fn draw_window(c: &Canvas, w: &Win, focused: bool) {
-    // 外框
-    c.fill(w.x - 1, w.y - 1, w.w + 2, w.h + 2, WIN_BORDER);
-    c.fill(w.x, w.y, w.w, w.h, WIN_BG);
-    // 标题栏
-    c.fill(w.x, w.y, w.w, TITLE_H, if focused { TITLE_FOCUS } else { TITLE_IDLE });
-    c.text(w.x + 10, w.y + 6, w.title, TEXT);
-    // 关闭按钮
-    let bx = w.x + w.w - TITLE_H;
-    c.fill(bx, w.y, TITLE_H, TITLE_H, CLOSE);
-    c.text(bx + 10, w.y + 6, "x", TEXT);
+    // **柔和阴影**：没有 alpha 通道，用三层递减的实色叠出"离桌面有点距离"的感觉。
+    // 这一层是廉价感的主要来源——之前窗口是直接贴在壁纸上的。
+    c.fill(w.x + 6, w.y + 10, w.w, w.h, 0x00E4_E8EC);
+    c.fill(w.x + 3, w.y + 6, w.w, w.h, 0x00D2_D9E0);
+    c.fill(w.x + 1, w.y + 2, w.w, w.h, 0x00C2_CB_D4);
 
-    // 内容来自窗口自己的缓冲（将来是客户端画进去的像素）
+    // 主体：纯白 + 发丝边框
+    c.fill(w.x, w.y, w.w, w.h, 0x00FF_FFFF);
+    c.fill(w.x - 1, w.y - 1, w.w + 2, 1, WIN_BORDER);
+    c.fill(w.x - 1, w.y + w.h, w.w + 2, 1, WIN_BORDER);
+    c.fill(w.x - 1, w.y, 1, w.h, WIN_BORDER);
+    c.fill(w.x + w.w, w.y, 1, w.h, WIN_BORDER);
+
+    // 标题栏：浅灰，聚焦时更亮一点，底部一条分隔线
+    c.fill(w.x, w.y, w.w, TITLE_H, if focused { TITLE_FOCUS } else { TITLE_IDLE });
+    c.fill(w.x, w.y + TITLE_H - 1, w.w, 1, 0x00E3_E6EA);
+    // 聚焦强调：标题下方 2px 的细色条（不抢眼，但能看出谁是焦点）
+    if focused {
+        c.fill(w.x + 1, w.y + TITLE_H - 1, w.w - 2, 2, 0x00E9_5454);
+    }
+    // 标题文字：垂直居中（TITLE_H 34，字高 16 → 偏移 9）
+    c.text(w.x + 16, w.y + 9, w.title, 0x002B_2F33);
+
+    // 关闭键：12px 圆点（放大一点、留足边距，比整块红条体面）
+    // 关闭键：一个 12px 的圆点。没有抗锯齿，用"十字 + 方块"两级近似成圆。
+    let bx = w.x + w.w - 26;
+    let dot = if focused { 0x00FF_5F_57 } else { 0x00D6_DADD };
+    c.fill(bx + 2, w.y + 11, 8, 12, dot);
+    c.fill(bx, w.y + 13, 12, 8, dot);
+
+    // 内容来自窗口自己的缓冲
     match &w.canvas {
         Some(cv) => c.blit(cv, w.x, w.y + TITLE_H),
         None => c.fill(w.x, w.y + TITLE_H, w.w, w.h - TITLE_H, WIN_BG),
@@ -761,6 +921,7 @@ fn dump_fd(d: &mut Desktop, fd: i64, limit_lines: Option<i64>) {
 /// 这里有一批命令是**真的会干活**的：走系统调用读目录、读文件、切目录、删文件。
 /// 没实现的两类会如实说明原因（内核缺 syscall / 未预装工具）。
 fn term_run(d: &mut Desktop) {
+    liblumi::println("[t] run");
     // 先把命令行拷到本地：后面要 &mut d 输出，不能再借着 d 的不可变引用
     let mut lbuf = [0u8; 64];
     let ln = d.term_len.min(64);
@@ -914,6 +1075,7 @@ fn term_run(d: &mut Desktop) {
             }
         }
         "echo" => {
+            liblumi::println("[t] echo");
             let rest = cmdline.strip_prefix("echo").unwrap_or("").trim_start();
             out_str(d, rest);
             out_nl(d);
@@ -961,19 +1123,76 @@ fn repaint_term(d: &mut Desktop) {
         let first = n.saturating_sub(17);
         let mut y = 34;
         for i in first..n {
+            // 按窗口宽度截断：长行不能顶出窗口边框（以前会压到隔壁窗口）
+            let maxc = (((cv.width as i32) - 40) / 12).max(1) as usize;
+            let n = lens[i].min(maxc);
             let s = unsafe {
-                core::str::from_utf8_unchecked(&text[starts[i]..starts[i] + lens[i]])
+                core::str::from_utf8_unchecked(&text[starts[i]..starts[i] + n])
             };
-            cv.text_bg(34, y, s, TEXT, WIN_BG);
+            cv.text_bg(34, y, s, TEXT_DK, 0x00FC_FCFC);
             y += 16;
         }
-        let line = unsafe { core::str::from_utf8_unchecked(&d.term_line[..d.term_len]) };
-        cv.text_bg(34, y + 2, ">", ACCENT, WIN_BG);
-        cv.text_bg(50, y + 2, line, TEXT, WIN_BG);
-        cv.fill(50 + (d.term_len as i32) * 8, y + 2, 8, 16, ACCENT);
+        let maxc = (((cv.width as i32) - 56) / 12).max(1) as usize;
+        let ln = d.term_len.min(maxc);
+        let line = unsafe { core::str::from_utf8_unchecked(&d.term_line[..ln]) };
+        cv.text_bg(34, y + 2, ">", 0x00E9_5454, 0x00FC_FCFC);
+        cv.text_bg(50, y + 2, line, TEXT_DK, 0x00FC_FCFC);
+        cv.fill(50 + (d.term_len as i32) * 12, y + 2, 16, 16, 0x00E9_5454);
     }
 }
 
+
+/// 尝试接入浏览器客户端：读它发布的握手文件，映射同一块共享内存。
+///
+/// 这是**不用 fork** 的客户端模式：客户端自己申请缓冲并把 id 写进文件，
+/// 窗口服务读到就贴图。客户端崩了只影响自己那块区域，服务端不受牵连。
+fn adopt_browser(d: &mut Desktop) {
+    if d.browser_adopted {
+        return;
+    }
+    let fd = liblumi::open("/data/win-browser.conf", liblumi::O_RDONLY);
+    if fd < 0 {
+        return;
+    }
+    let mut buf = [0u8; 32];
+    let n = read(fd, &mut buf);
+    close(fd);
+    if n <= 0 {
+        return;
+    }
+    let mut nums = [0i64; 3];
+    let mut idx = 0usize;
+    let mut cur = 0i64;
+    let mut any = false;
+    for i in 0..n as usize {
+        let c = buf[i];
+        if c.is_ascii_digit() {
+            cur = cur * 10 + (c - b'0') as i64;
+            any = true;
+        } else if any {
+            if idx < 3 {
+                nums[idx] = cur;
+                idx += 1;
+            }
+            cur = 0;
+            any = false;
+        }
+    }
+    if any && idx < 3 {
+        nums[idx] = cur;
+        idx += 1;
+    }
+    if idx < 3 || nums[0] <= 0 || nums[1] <= 0 || nums[2] <= 0 {
+        return;
+    }
+    if let Some(va) = shm_map(nums[0]) {
+        let cv = Canvas::from_shm(va, nums[1] as u32, nums[2] as u32);
+        d.wins[2].canvas = Some(cv);
+        d.browser_adopted = true;
+        d.dirty = true;
+        // 客户端画的内容在它自己那侧，这里只要贴上去就行
+    }
+}
 
 /// 重新读取当前目录，填进文件管理器的列表。
 fn fm_refresh(d: &mut Desktop) {
@@ -1003,44 +1222,97 @@ fn fm_refresh(d: &mut Desktop) {
     fm_paint(d);
 }
 
-/// 把列表画进窗口自己的缓冲。
+/// 把列表画进窗口自己的缓冲 —— 布局照着 Ubuntu 的 Files（Nautilus）：
+/// 顶部是路径条，左侧是位置栏（Places），右侧是文件列表。
 fn fm_paint(d: &mut Desktop) {
     let w = d.wins[0];
-    if let Some(cv) = w.canvas {
-        paint_body(&cv, &w);
-        if d.fm_n == 0 {
-            cv.text_bg(34, 40, "(empty directory)", TEXT_DIM, WIN_BG);
-            return;
+    let cv = match w.canvas {
+        Some(c) => c,
+        None => return,
+    };
+    let cw = cv.width as i32;
+    let chh = cv.height as i32;
+
+    cv.clear(0x00FC_FCFC);
+
+    // ---- 顶栏：路径条 + 视图按钮 ----
+    cv.fill(0, 0, cw, 44, 0x00F6_F5F4);
+    cv.fill(0, 43, cw, 1, 0x00DE_D9D6);
+    // 返回/前进箭头
+    cv.fill(14, 16, 12, 12, 0x0055_5753);
+    cv.fill(34, 16, 12, 12, 0x0055_5753);
+    // 路径胶囊
+    cv.fill(56, 10, cw - 120, 24, 0x00FF_FFFF);
+    cv.fill(56, 10, cw - 120, 1, 0x00DE_D9D6);
+    cv.fill(56, 33, cw - 120, 1, 0x00DE_D9D6);
+    cv.text(66, 15, "/  data", 0x0024_2424);
+
+    // ---- 左侧位置栏 ----
+    let sidebar = 150i32;
+    cv.fill(0, 44, sidebar, chh - 44, 0x00F6_F5F4);
+    cv.fill(sidebar, 44, 1, chh - 44, 0x00DE_D9D6);
+    let places = ["Home", "Documents", "Downloads", "Music", "Pictures", "Videos"];
+    let mut py = 56;
+    for (i, name) in places.iter().enumerate() {
+        let sel = i == 0;
+        if sel {
+            cv.fill(8, py - 4, sidebar - 16, 26, 0x00FC_EA_E9); // 极浅的暖底
+            cv.fill(8, py - 4, 3, 26, 0x00E9_5454);              // 左侧 3px 色条
         }
-        let mut y = 34i32;
-        let first = if d.fm_sel >= 14 { d.fm_sel - 13 } else { 0 };
-        for i in first..d.fm_n.min(first + 14) {
-            let e = d.fm_entries[i];
-            let name = e.as_str();
-            let selected = i == d.fm_sel;
-            let bg = if selected { ACCENT } else { WIN_BG };
-            let fg = if selected { 0x0000_0000 } else if e.is_dir { 0x00E8_C46A } else { TEXT };
-            cv.fill(16, y - 2, cv.width as i32 - 32, 16, bg);
-            cv.text_bg(24, y, if e.is_dir { "/" } else { " " }, fg, bg);
-            cv.text_bg(36, y, name, fg, bg);
-            y += 17;
-        }
-        cv.text_bg(34, cv.height as i32 - 22, "UP/DOWN move  ENTER open  BS up", TEXT_DIM, WIN_BG);
+        let col = 0x0033_3639;
+        // 小方块当图标
+        cv.fill(18, py + 3, 9, 9, if sel { 0x00E9_5454 } else { 0x00AE_ABA7 });
+        cv.text_bg(34, py, name, col, if sel { 0x00FC_EA_E9 } else { 0x00F8_F7F6 });
+        py += 30;
     }
+
+    // ---- 右侧文件列表 ----
+    let list_x = sidebar + 12;
+    let row_h = 34;
+    let mut y = 56;
+    if d.fm_n == 0 {
+        cv.text_bg(list_x, y, "(empty)", 0x0055_5753, 0x00FC_FCFC);
+        return;
+    }
+    let visible_rows = ((chh - 60) / row_h).max(1) as usize;
+    let first = if d.fm_sel >= visible_rows {
+        d.fm_sel + 1 - visible_rows
+    } else {
+        0
+    };
+    for i in first..(first + visible_rows).min(d.fm_n) {
+        let e = d.fm_entries[i];
+        let sel = i == d.fm_sel;
+        if sel {
+            cv.fill(list_x - 6, y - 4, cw - list_x - 6, row_h - 2, 0x00FC_EA_E9);
+            cv.fill(list_x - 6, y - 4, 3, row_h - 2, 0x00E9_5454);
+        }
+        // 图标：目录用橙黄方块，文件用灰白方块
+        let icon = if e.is_dir { 0x00E5_A50B } else { 0x00CF_CFCF };
+        cv.fill(list_x, y, 16, 16, icon);
+        let col = if sel { 0x00C0_3A_33 } else { 0x0024_2424 };
+        let bg = if sel { 0x00FC_EA_E9 } else { 0x00FF_FFFF };
+        // 文件名按剩余宽度截断，别顶出窗口
+        let room = (((cw - list_x - 40) / 12).max(1)) as usize;
+        let nm = e.as_str();
+        let nm = &nm[..nm.len().min(room)];
+        cv.text_bg(list_x + 26, y, nm, col, bg);
+        y += row_h;
+    }
+    // 底部状态条
+    cv.fill(0, chh - 18, cw, 18, 0x00F6_F5F4);
+    cv.text_bg(sidebar + 12, chh - 16, "UP/DOWN  ENTER", 0x0055_5753, 0x00F6_F5F4);
 }
 
-
-/// 把窗口内容画进它自己的缓冲。
+/// 尝试接入浏览器客户端：读它发布的握手文件，映射同一块共享内存。
 ///
-/// 现在画的是占位内容；接客户端时这个函数会**整体搬到客户端进程**里，
-/// 服务端只保留 `blit`。
+/// 这是**不用 fork** 的客户端模式：客户端自己申请缓冲并把 id 写进文件，
+/// 窗口服务读到就贴图。客户端崩了只影响自己那块区域，服务端不受牵连。
 fn paint_body(cv: &Canvas, w: &Win) {
-    cv.clear(WIN_BG);
-    cv.fill(16, 16, 6, cv.height as i32 - 32, w.color);
-    cv.text(34, 18, w.title, TEXT);
-    cv.text(34, 40, w.body, TEXT_DIM);
-    cv.text(34, 66, "own pixel buffer (shm)", TEXT_DIM);
-    cv.fill(34, 94, cv.width as i32 - 60, 1, WIN_BORDER);
+    // 只铺白底。占位文案和那条彩色竖条都去掉——
+    // 它们是"演示程序"的味道，真实应用的窗口里不该有这种东西。
+    cv.clear(0x00FF_FFFF);
+    let _ = w;
 }
 
 fn draw_cursor(c: &Canvas, x: i32, y: i32) {

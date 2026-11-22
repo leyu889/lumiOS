@@ -66,6 +66,14 @@ static REGIONS: IrqSpinlock<[Region; SHM_MAX]> = IrqSpinlock::new(
 
 static FB_MAPPED: AtomicBool = AtomicBool::new(false);
 
+/// 输入事件的所有者（tid）。**第一个映射帧缓冲的进程**就是窗口服务，
+/// 键盘事件只发给它。
+///
+/// 为什么必须这么做：输入队列是全局的，`input_read` 谁调谁拿。
+/// 客户端进程也去轮询的话，按键会被它吃掉，窗口服务收不到——
+/// 表现就是"按键完全没反应"，而内核日志里事件明明被取走了。
+static INPUT_OWNER: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
 fn err(e: i64) -> i64 {
     -e
 }
@@ -124,13 +132,25 @@ fn fb_map() -> i64 {
         }
     }
     FB_MAPPED.store(true, Ordering::Release);
+    // 谁映射帧缓冲，谁就是窗口服务 —— 由它独占输入
+    INPUT_OWNER.store(crate::task::current_tid(), Ordering::Release);
     FB_VA_USER as i64
 }
 
 /// 取一个输入事件；没有事件返回 0（键码 0 永远不会被产生，可以安全当"空"用）。
 fn input_read() -> i64 {
+    // 只把事件发给窗口服务；其他进程一律拿不到（返回"没有事件"）。
+    // 这样客户端即使误调也抢不走键盘。
+    let owner = INPUT_OWNER.load(Ordering::Acquire);
+    if owner != 0 && owner != crate::task::current_tid() {
+        return 0;
+    }
     match crate::dev::ps2::poll_event() {
-        Some(ev) => ev as i64,
+        Some(ev) => {
+            // 诊断：确认"队里真的有事件"以及"被哪个进程取走了"
+            kserialln!("[input] pop ev=0x{:X}", ev);
+            ev as i64
+        }
         None => 0,
     }
 }

@@ -257,18 +257,107 @@ fn render(cv: &Canvas, src: &str) {
     let _ = DIM;
 }
 
+/// 从 /data/win.conf 读握手信息："id w h"
+fn read_conf() -> Option<(i64, u32, u32)> {
+    let fd = open("/data/win.conf", O_RDONLY);
+    if fd < 0 {
+        return None;
+    }
+    let mut buf = [0u8; 64];
+    let n = read(fd, &mut buf);
+    close(fd);
+    if n <= 0 {
+        return None;
+    }
+    let n = n as usize;
+    let mut nums = [0i64; 3];
+    let mut idx = 0usize;
+    let mut cur: i64 = 0;
+    let mut any = false;
+    for i in 0..n {
+        let c = buf[i];
+        if c.is_ascii_digit() {
+            cur = cur * 10 + (c - b'0') as i64;
+            any = true;
+        } else if any {
+            if idx < 3 {
+                nums[idx] = cur;
+                idx += 1;
+            }
+            cur = 0;
+            any = false;
+        }
+    }
+    if any && idx < 3 {
+        nums[idx] = cur;
+        idx += 1;
+    }
+    if idx < 3 || nums[0] <= 0 {
+        return None;
+    }
+    Some((nums[0], nums[1] as u32, nums[2] as u32))
+}
+
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
-    let cv = match Canvas::screen() {
-        Some(c) => c,
-        None => {
-            println("[lumibrowser] 没有帧缓冲");
-            exit(2);
+    // 客户端模式：**自己**申请一块共享缓冲，把 id 写进握手文件，
+    // 窗口服务读到之后映射同一块内存贴到屏幕上。
+    // 这样完全不需要 fork（内核直接拉起两个进程）。
+    let mut cv_opt: Option<Canvas> = None;
+    const BW: u32 = 520;
+    const BH: u32 = 300;
+    let pages = ((BW * BH * 4) as usize + 4095) / 4096;
+    let id = shm_alloc(pages);
+    if id > 0 {
+        if let Some(va) = shm_map(id) {
+            cv_opt = Some(Canvas::from_shm(va, BW, BH));
+            // 写握手文件：id 宽 高
+            let fd = open(
+                "/data/win-browser.conf",
+                O_WRONLY | O_CREAT | O_TRUNC,
+            );
+            if fd >= 0 {
+                let mut line = [0u8; 32];
+                let mut n = 0usize;
+                let mut vals = [id as u64, BW as u64, BH as u64];
+                for v in vals.iter_mut() {
+                    let mut tmp = [0u8; 20];
+                    let mut t = 0usize;
+                    let mut x = *v;
+                    if x == 0 {
+                        tmp[0] = b'0';
+                        t = 1;
+                    }
+                    while x > 0 {
+                        tmp[t] = b'0' + (x % 10) as u8;
+                        x /= 10;
+                        t += 1;
+                    }
+                    while t > 0 {
+                        t -= 1;
+                        line[n] = tmp[t];
+                        n += 1;
+                    }
+                    line[n] = b' ';
+                    n += 1;
+                }
+                line[n] = 10;
+                n += 1;
+                write(fd, &line[..n]);
+                close(fd);
+            }
         }
+    }
+    let cv = match cv_opt {
+        Some(c) => c,
+        None => match Canvas::screen() {
+            Some(c) => c,
+            None => {
+                exit(2);
+            }
+        },
     };
-    println("[lumibrowser] 独立进程启动，开始渲染");
 
-    // 优先读 /data/index.html
     static mut PAGE: [u8; 8192] = [0; 8192];
     let mut len = 0usize;
     let fd = open("/data/index.html", O_RDONLY);
@@ -290,23 +379,19 @@ pub extern "C" fn _start() -> ! {
         }
         close(fd);
     }
-
     if len > 0 {
         let src = unsafe { core::str::from_utf8_unchecked(&PAGE[..len]) };
         render(&cv, src);
     } else {
         render(&cv, DEMO_HTML);
     }
-    println("[lumibrowser] 渲染完成");
 
+    // **客户端不读键盘**：内核的输入事件队列是全局的，谁先取谁拿走。
+    // 之前这里每个循环都 input_read()，把按键全吞了，
+    // 导致窗口服务收不到任何键（表现为"按 F2 没反应、终端打不了字"）。
+    // 键盘归窗口服务独占，客户端要事件得等 IPC 通道做好。
     loop {
-        // 简单事件循环：ESC 退出，其余忽略
-        if let Some(k) = input_read() {
-            if k.pressed && k.code == KEY_ESC {
-                exit(0);
-            }
-        }
-        for _ in 0..20_000 {
+        for _ in 0..200_000 {
             core::hint::spin_loop();
         }
     }

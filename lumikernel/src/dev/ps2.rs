@@ -189,6 +189,9 @@ pub fn poll() {
             break;
         }
         let byte = unsafe { inb(PS2_DATA) };
+        // 诊断：把收到的每个字节打到串口。按键不通时，这行能立刻分清
+        // "内核没收到" 还是 "收到了没处理"——之前只能靠屏幕猜。
+        kserialln!("[ps2] raw=0x{:02X}", byte);
         // bit5 = 数据来自辅助端口（鼠标）
         if status & 0x20 != 0 {
             handle_mouse_byte(byte);

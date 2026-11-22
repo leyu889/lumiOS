@@ -35,8 +35,8 @@ const HANDOFF_PHYS: u64 = 0x9380;
 const MAGIC: u32 = 0x4449_564C; // 'LVID'
 
 /// 字模单元宽高（与 `font8x16` 一致）。
-pub const CELL_W: u32 = 8;
-pub const CELL_H: u32 = 16;
+pub const CELL_W: u32 = crate::font16::CELL_W; // 16
+pub const CELL_H: u32 = crate::font16::CELL_H; // 16
 
 // 调色板：深色底 + 浅色字，接近现代终端的观感。
 pub const BG: u32 = 0x0010_141C;
@@ -173,18 +173,19 @@ pub fn clear(color: u32) {
 /// 画一个字模（8x16）。`fg` 只填有点的像素，背景保持不动——
 /// 这样上层可以先画底色再叠字，也方便做"选中"效果。
 pub fn draw_glyph(x: u32, y: u32, ch: u8, fg: u32) {
-    let idx = ch.wrapping_sub(crate::font8x16::FIRST_CHAR) as usize;
-    if idx >= crate::font8x16::FONT.len() {
+    let idx = ch.wrapping_sub(crate::font16::FIRST_CHAR) as usize;
+    if idx >= crate::font16::FONT.len() {
         return;
     }
-    let glyph = &crate::font8x16::FONT[idx];
+    let glyph = &crate::font16::FONT[idx];
     for (dy, bits) in glyph.iter().enumerate() {
         if *bits == 0 {
             continue;
         }
         let py = y + dy as u32;
+        // 字模现在是 16 位宽的一行，最高位是最左像素
         for dx in 0..CELL_W {
-            if bits & (0x80 >> dx) != 0 {
+            if bits & (1u16 << (CELL_W - 1 - dx)) != 0 {
                 put_pixel(x + dx, py, fg);
             }
         }
