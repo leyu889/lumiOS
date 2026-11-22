@@ -421,6 +421,11 @@ impl Canvas {
         self.fill(0, 0, self.width as i32, self.height as i32, color);
     }
 
+    /// 画一个字形（带抗锯齿）。
+    ///
+    /// 字模每像素 2 bit：0=空、1=25%、2=50%、3=实心。
+    /// 非实心像素要**读目标像素做混合**——这样才能保留思源黑体的曲线边缘，
+    /// 否则就是一张啃过的黑白点阵图（"像老式点阵字体"的根源）。
     pub fn glyph(&self, x: i32, y: i32, ch: u8, color: u32) {
         let idx = ch.wrapping_sub(font::FIRST_CHAR) as usize;
         if idx >= font::FONT.len() {
@@ -432,8 +437,32 @@ impl Canvas {
                 continue;
             }
             for dx in 0..font::CELL_W {
-                if bits & (1u16 << (font::CELL_W - 1 - dx)) != 0 {
-                    self.put(x + dx as i32, y + dy as i32, color);
+                let lvl = (bits >> (2 * (font::CELL_W - 1 - dx))) & 3;
+                if lvl == 0 {
+                    continue;
+                }
+                let px = x + dx as i32;
+                let py = y + dy as i32;
+                if lvl == 3 {
+                    self.put(px, py, color);
+                    continue;
+                }
+                // 取目标像素做线性混合（写之前先读）
+                if px < 0 || py < 0 || px >= self.width as i32 || py >= self.height as i32 {
+                    continue;
+                }
+                let off = (py as u32 * self.pitch / 4 + px as u32) as isize;
+                // SAFETY: 坐标已判在界内
+                let dst = unsafe { core::ptr::read_volatile(self.ptr.offset(off)) };
+                let a = if lvl == 2 { 2u32 } else { 1u32 };
+                let mix = |f: u32, d: u32| -> u32 {
+                    (((f & 0xFF) * a + (d & 0xFF) * (3 - a)) / 3) & 0xFF
+                };
+                let out = (mix(color >> 16, dst >> 16) << 16)
+                    | (mix(color >> 8, dst >> 8) << 8)
+                    | mix(color, dst);
+                unsafe {
+                    core::ptr::write_volatile(self.ptr.offset(off) as *mut u32, out);
                 }
             }
         }
@@ -443,16 +472,23 @@ impl Canvas {
         let mut cx = x;
         for b in s.bytes() {
             self.glyph(cx, y, b, color);
-            cx += font::CELL_W as i32;
+            let ai = b.wrapping_sub(font::FIRST_CHAR) as usize;
+            cx += if ai < font::ADV.len() { font::ADV[ai] as i32 } else { 6 };
         }
     }
 
     /// 带底色的文字（先抹掉整行高度，避免叠加残影）。
     pub fn text_bg(&self, x: i32, y: i32, s: &str, fg: u32, bg: u32) {
-        // 宽度按"画布剩余宽度"截断：长字符串不该把背景矩形推到界外
-        let nb = s.len() as i32;
-        let max_chars = ((self.width as i32 - x) / font::CELL_W as i32).max(0);
-        let w = nb.min(max_chars).max(0) * font::CELL_W as i32;
+        // 背景宽度按实际字宽累加（比例字体，不能按字符数乘固定宽度）
+        let mut w = 0i32;
+        for b in s.bytes() {
+            let ai = b.wrapping_sub(font::FIRST_CHAR) as usize;
+            let adv = if ai < font::ADV.len() { font::ADV[ai] as i32 } else { 6 };
+            if x + w + adv > self.width as i32 {
+                break;
+            }
+            w += adv;
+        }
         if w > 0 {
             self.fill(x, y, w, font::CELL_H as i32, bg);
         }

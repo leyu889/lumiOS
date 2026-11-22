@@ -183,9 +183,11 @@ pub fn draw_glyph(x: u32, y: u32, ch: u8, fg: u32) {
             continue;
         }
         let py = y + dy as u32;
-        // 字模现在是 16 位宽的一行，最高位是最左像素
+        // 字模每像素 2 bit（0..3）。控制台只有一个前景色，
+        // 取 >=2 的像素当实心，1 当浅一档也画上（保证细笔画不断）。
         for dx in 0..CELL_W {
-            if bits & (1u16 << (CELL_W - 1 - dx)) != 0 {
+            let lvl = (bits >> (2 * (CELL_W - 1 - dx))) & 3;
+            if lvl >= 1 {
                 put_pixel(x + dx, py, fg);
             }
         }

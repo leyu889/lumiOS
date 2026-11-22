@@ -249,6 +249,17 @@ pub extern "C" fn _start() -> ! {
     // 先画会被随后的 paint_body 占位内容盖掉（这个坑踩过两次）。
     fm_refresh(&mut d);
 
+    // 鼠标映射自检（headless 注入不了鼠标事件，只能验算法）
+    {
+        let w0 = d.wins[0];
+        let probe_x = w0.x + 200;
+        let probe_y = w0.y + TITLE_H + 44 + 34 + 10; // 第二行
+        match fm_row_at(&w0, probe_x, probe_y, 0) {
+            Some(1) => liblumi::println("[mouse] row map ok"),
+            _ => liblumi::println("[mouse] row map BAD"),
+        }
+    }
+
     out_str(&mut d, "LumiOS shell - type help");
     out_nl(&mut d);
     d.term_line[0] = b'l';
@@ -293,13 +304,9 @@ pub extern "C" fn _start() -> ! {
                             d.drag_dy = d.my;
                         } else if wi == 0 {
                             // 文件管理器：点行就选中（以前只有键盘能选）
-                            let lx = w.x + 162;   // 列表起点（侧栏 150 + 12）
-                            let ly = w.y + TITLE_H + 44;
-                            if d.mx >= lx && d.my >= ly {
-                                let row = ((d.my - ly) / 34) as usize;
-                                let visible = ((w.h - TITLE_H - 60) / 34).max(1) as usize;
-                                let first = if d.fm_sel >= visible { d.fm_sel + 1 - visible } else { 0 };
-                                let idx = first + row;
+                            let visible = ((w.h - TITLE_H - 60) / 34).max(1) as usize;
+                            let first = if d.fm_sel >= visible { d.fm_sel + 1 - visible } else { 0 };
+                            if let Some(idx) = fm_row_at(&w, d.mx, d.my, first) {
                                 if idx < d.fm_n {
                                     d.fm_sel = idx;
                                     // 再点一次同一行 = 打开（简化版双击）
@@ -557,9 +564,10 @@ fn draw_icons(c: &Canvas) {
 fn draw_window(c: &Canvas, w: &Win, focused: bool) {
     // **柔和阴影**：没有 alpha 通道，用三层递减的实色叠出"离桌面有点距离"的感觉。
     // 这一层是廉价感的主要来源——之前窗口是直接贴在壁纸上的。
-    c.fill(w.x + 6, w.y + 10, w.w, w.h, 0x00E4_E8EC);
-    c.fill(w.x + 3, w.y + 6, w.w, w.h, 0x00D2_D9E0);
-    c.fill(w.x + 1, w.y + 2, w.w, w.h, 0x00C2_CB_D4);
+    // 深色三层：壁纸是深蓝，浅色阴影会读成"多了一个窗口"。
+    c.fill(w.x + 10, w.y + 12, w.w, w.h, 0x001B_2432);
+    c.fill(w.x + 6, w.y + 8, w.w, w.h, 0x0017_1F2B);
+    c.fill(w.x + 3, w.y + 4, w.w, w.h, 0x0013_1A24);
 
     // 主体：纯白 + 发丝边框
     c.fill(w.x, w.y, w.w, w.h, 0x00FF_FFFF);
@@ -1137,10 +1145,24 @@ fn repaint_term(d: &mut Desktop) {
         let line = unsafe { core::str::from_utf8_unchecked(&d.term_line[..ln]) };
         cv.text_bg(34, y + 2, ">", 0x00E9_5454, 0x00FC_FCFC);
         cv.text_bg(50, y + 2, line, TEXT_DK, 0x00FC_FCFC);
-        cv.fill(50 + (d.term_len as i32) * 12, y + 2, 16, 16, 0x00E9_5454);
+        cv.fill(50 + (d.term_len as i32) * 6, y + 2, 2, 16, 0x00E9_5454);
     }
 }
 
+
+/// 把屏幕坐标映射成文件列表的行号。
+///
+/// 抽出来是为了**能单独验证**：鼠标事件在 headless 虚拟机里注入不了，
+/// 但这段"坐标算出第几行"的数学可以拿合成坐标直接跑。
+fn fm_row_at(w: &Win, mx: i32, my: i32, first: usize) -> Option<usize> {
+    let lx = w.x + 162;
+    let ly = w.y + TITLE_H + 44;
+    if mx < lx || my < ly {
+        return None;
+    }
+    let row = ((my - ly) / 34) as usize;
+    Some(first + row)
+}
 
 /// 尝试接入浏览器客户端：读它发布的握手文件，映射同一块共享内存。
 ///
@@ -1315,34 +1337,39 @@ fn paint_body(cv: &Canvas, w: &Win) {
     let _ = w;
 }
 
+/// 画鼠标指针。
+///
+/// 之前是几个方块拼的"伪箭头"，边缘全是台阶，一眼假。
+/// 现在用一张 11x16 的位图：`#` 描边（黑）、`*` 填充（白），
+/// 这是 Windows/macOS 指针的经典形状，缩到 1:1 像素也不会糊。
 fn draw_cursor(c: &Canvas, x: i32, y: i32) {
-    // 简单的箭头光标：12x18 的位图，用两遍画（先描边后填充）
-    const CUR: [u16; 18] = [
-        0b1000_0000_0000,
-        0b1100_0000_0000,
-        0b1110_0000_0000,
-        0b1111_0000_0000,
-        0b1111_1000_0000,
-        0b1111_1100_0000,
-        0b1111_1110_0000,
-        0b1111_1111_0000,
-        0b1111_1111_1000,
-        0b1111_1000_0000,
-        0b1101_1000_0000,
-        0b1000_1100_0000,
-        0b0000_1100_0000,
-        0b0000_0110_0000,
-        0b0000_0110_0000,
-        0b0000_0011_0000,
-        0b0000_0011_0000,
-        0b0000_0001_1000,
+    const CUR: [&str; 16] = [
+        "#..........",
+        "##.........",
+        "#*#........",
+        "#**#.......",
+        "#***#......",
+        "#****#.....",
+        "#*****#....",
+        "#******#...",
+        "#*******#..",
+        "#****#####.",
+        "#**#****#..",
+        "#*#.#***#..",
+        "##...#**#..",
+        ".....###*#.",
+        "......#**#.",
+        ".......##..",
     ];
     for (dy, row) in CUR.iter().enumerate() {
-        for dx in 0..12 {
-            if row & (0x800 >> dx) != 0 {
-                c.put(x + dx, y + dy as i32, CURSOR_FG);
-            }
+        for (dx, ch) in row.bytes().enumerate() {
+            let color = match ch {
+                b'#' => 0x0012_1720,
+                b'*' => 0x00FF_FFFF,
+                _ => continue,
+            };
+            // 贴边时也要画得出来：put 内部已做边界钳制
+            c.put(x + dx as i32, y + dy as i32, color);
         }
     }
-    let _ = CURSOR_BG;
 }

@@ -17,7 +17,7 @@
 from PIL import Image, ImageDraw, ImageFont
 import io
 
-FONT = r'E:\workbuddy\Deepseek_OS\kernel\res\fonts\SourceHanSansSC-Bold.otf'
+FONT = r'E:\workbuddy\Deepseek_OS\kernel\res\fonts\SourceHanSansSC-Regular.otf'
 OUT = r'E:\workbuddy\Deepseek_OS\kernel\lumikernel\src\font16.rs'
 
 CELL_W, CELL_H = 12, 16
@@ -48,26 +48,40 @@ def glyph_bits(ch):
     if bb is None:
         return [0] * CELL_H
 
-    # 水平方向按笔迹中心对齐到格子中心（不影响垂直度量）
-    cx_src = (bb[0] + bb[2]) / 2.0
-    cx_cell = (CELL_W - 1) / 2.0
+    # **左对齐**：笔迹左边贴着格子的第 0 列。
+    # 等宽格子那套"居中"在比例排版下会互相重叠，必须改成左对齐 + 按字宽推进。
+    cx_src = float(bb[0])
 
+    # **区域平均**（box filter）：把目标像素覆盖的源区域取平均，
+    # 才有真正的中间灰度。用最近邻的话，30px 直接点到 12px 只会出黑白。
+    from PIL import ImageStat
     rows = []
     for y in range(CELL_H):
-        sy = int(round(BASE_SRC + (y - GRID_BASE) / S))
+        sy_c = BASE_SRC + (y - GRID_BASE) / S          # 目标行中心对应的源行
+        sy0 = sy_c - 0.5 / S
+        sy1 = sy_c + 0.5 / S
         bits = 0
         for x in range(CELL_W):
-            sx = int(round(cx_src + (x - cx_cell) / S))
-            ok = (0 <= sx < SRC_W) and (0 <= sy < SRC_H) and img.getpixel((sx, sy)) >= THRESH
-            if ok:
-                bits |= 1 << (CELL_W - 1 - x)
+            sx_c = cx_src + x / S
+            sx0 = sx_c - 0.5 / S
+            sx1 = sx_c + 0.5 / S
+            box = (
+                max(0, int(sx0)), max(0, int(sy0)),
+                min(SRC_W, int(sx1) + 1), min(SRC_H, int(sy1) + 1),
+            )
+            if box[2] <= box[0] or box[3] <= box[1]:
+                lvl = 0
+            else:
+                v = ImageStat.Stat(img.crop(box)).mean[0]
+                lvl = 3 if v >= 120 else (2 if v >= 70 else (1 if v >= 25 else 0))
+            bits |= lvl << (2 * (CELL_W - 1 - x))
         rows.append(bits)
     return rows
 
 
 out = []
 out.append('//! %dx%d 点阵字库（ASCII 0x20..0x7F），由 `tools/mkfont16.py` 从' % (CELL_W, CELL_H))
-out.append('//! `res/fonts/SourceHanSansSC-Bold.otf`（思源黑体 Bold）构建期光栅化生成。')
+out.append('//! `res/fonts/SourceHanSansSC-Regular.otf`（思源黑体 Bold）构建期光栅化生成。')
 out.append('//!')
 out.append('//! **所有字形共用同一个缩放比与同一条基线**（由字体 ascent/descent 推出），')
 out.append('//! 不是逐字"裁切填满"——后者会让每个字高度不一、基线漂移，看起来是拼的。')
@@ -84,13 +98,38 @@ out.append('')
 out.append('pub const FIRST_CHAR: u8 = 0x%02X;' % FIRST)
 out.append('pub const LAST_CHAR: u8 = 0x%02X;' % LAST)
 out.append('')
-out.append('pub static FONT: [[u16; %d]; %d] = [' % (CELL_H, LAST - FIRST + 1))
+adv = []
+for code in range(FIRST, LAST + 1):
+    ch = chr(code)
+    if ch == ' ':
+        adv.append(max(3, int(round(f.getlength(ch) * S))))
+    else:
+        _img = Image.new('L', (SRC_W, SRC_H), 0)
+        ImageDraw.Draw(_img).text((SRC_W // 2, BASE_SRC), ch, font=f, fill=255, anchor="ms")
+        _bb = _img.getbbox()
+        w = (_bb[2] - _bb[0]) if _bb else 4
+        adv.append(max(3, min(CELL_W, int(round(w * S)) + 1)))
+
+out.append('/// 每个字形的**推进宽度**（像素）。比例排版靠它累加，')
+out.append('/// 等宽格子会让 `i` 和 `m` 占同样宽度，字距看起来就是散的。')
+out.append('pub static ADV: [u8; %d] = [' % (LAST - FIRST + 1))
+line = '    '
+for i, a in enumerate(adv):
+    line += '%d, ' % a
+    if (i + 1) % 16 == 0:
+        out.append(line.rstrip())
+        line = '    '
+if line.strip():
+    out.append(line.rstrip())
+out.append('];')
+out.append('')
+out.append('pub static FONT: [[u32; %d]; %d] = [' % (CELL_H, LAST - FIRST + 1))
 for code in range(FIRST, LAST + 1):
     rows = glyph_bits(chr(code))
     out.append('    [')
     line = '        '
     for i, b in enumerate(rows):
-        line += '0x%04X, ' % b
+        line += '0x%06X, ' % b
         if (i + 1) % 8 == 0:
             out.append(line.rstrip())
             line = '        '
@@ -103,8 +142,8 @@ io.open(OUT, 'w', encoding='utf-8').write('\n'.join(out) + '\n')
 print('生成：%d 字形 %dx%d，缩放 s=%.3f，基线行=%.1f'
       % (LAST - FIRST + 1, CELL_W, CELL_H, S, GRID_BASE))
 
-for ch in 'Agxo':
+for ch in 'Ag':
     rows = glyph_bits(ch)
     print('--- %r ---' % ch)
     for b in rows:
-        print(''.join('#' if b & (1 << (CELL_W - 1 - i)) else '.' for i in range(CELL_W)))
+        print(''.join('.oO#'[(b >> (2 * (CELL_W - 1 - i))) & 3] for i in range(CELL_W)))
