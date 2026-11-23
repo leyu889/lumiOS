@@ -305,6 +305,11 @@ pub fn http_take(out: &mut [u8]) -> i64 {
     lumi(10, out.as_mut_ptr() as u64, out.len() as u64)
 }
 
+/// 往升级服务器发一条 UDP 请求（内核代劳），返回回包长度。
+pub fn udp_request(msg: &str) -> i64 {
+    lumi(11, msg.as_ptr() as u64, msg.len() as u64)
+}
+
 fn lumi(op: u64, a: u64, b: u64) -> i64 {
     call(SYS_LUMI, op, a, b)
 }

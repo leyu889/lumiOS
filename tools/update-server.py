@@ -81,9 +81,27 @@ class Handler(http.server.BaseHTTPRequestHandler):
         pass
 
 
+class UdpHandler(socketserver.BaseRequestHandler):
+    """极简 UDP 应答：收到 `version` 就回一行版本信息。"""
+    def handle(self):
+        data, sock = self.request
+        msg = data.decode('utf-8', 'replace').strip()
+        print('[udp] <-', repr(msg))
+        if msg == 'version':
+            exists = os.path.exists(ISO)
+            reply = 'LumiOS %s size=%d' % (VERSION, os.path.getsize(ISO) if exists else 0)
+        else:
+            reply = 'unknown'
+        sock.sendto(reply.encode(), self.client_address)
+
+
 if __name__ == '__main__':
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 8080
     socketserver.TCPServer.allow_reuse_address = True
+    import threading
+    udp = socketserver.UDPServer(('0.0.0.0', 9000), UdpHandler)
+    threading.Thread(target=udp.serve_forever, daemon=True).start()
+    print('UDP server on 0.0.0.0:9000')
     with socketserver.TCPServer(('0.0.0.0', port), Handler) as httpd:
         print('LumiOS update server on 0.0.0.0:%d' % port)
         print('  image:', ISO, '(exists)' if os.path.exists(ISO) else '(MISSING)')

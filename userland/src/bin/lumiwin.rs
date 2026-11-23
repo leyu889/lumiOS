@@ -1151,13 +1151,13 @@ fn term_run(d: &mut Desktop) {
         }
         "update-lumios" => {
             // 与升级服务器（10.0.2.2:8080）握手：先取版本号，再决定是否下载
-            out_str(d, "connecting to update server 10.0.2.2:8080 ...");
+            out_str(d, "udp: asking update server 10.0.2.2:9000 for version ...");
             out_nl(d);
-            let n = http_get("/version");
+            let n = udp_request("version");
             if n <= 0 {
                 out_str(d, "update server unreachable");
                 out_nl(d);
-                out_str(d, "check: port forward 8080 + tools/update-server.py on host");
+                out_str(d, "check: UDP 9000 forward + tools/update-server.py --udp");
                 out_nl(d);
             } else {
                 let mut buf = [0u8; 512];

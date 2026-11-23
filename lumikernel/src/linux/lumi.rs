@@ -42,6 +42,9 @@ const OP_RUN: u64 = 8;
 /// 从升级服务器 HTTP GET 一段内容（a1=路径, a2=路径长, a3=用户缓冲, 容量固定在 2048）
 const OP_HTTP_GET: u64 = 9;
 const OP_HTTP_TAKE: u64 = 10;
+/// UDP 请求：a1=请求缓冲, a2=长度。发出后等回包，结果进 HTTP_BUF/HTTP_LEN。
+/// 为什么不用 TCP：knet 的 tcp.rs 只有报文头解析，没有握手状态机，连不上真实服务器。
+const OP_UDP_REQ: u64 = 11;
 
 /// 帧缓冲在用户态看到的固定地址。
 pub const FB_VA_USER: u64 = 0x7000_0000;
@@ -135,6 +138,51 @@ fn http_take(ptr: u64, cap: u64) -> i64 {
         return err(klinux::errno::EFAULT);
     }
     want as i64
+}
+
+/// 往升级服务器发一个 UDP 数据报并等回包。
+///
+/// 协议极简：请求就是一行文本（如 `version`），服务器原样回一行。
+/// 没有握手、没有重传——先验证链路能通，再谈可靠性。
+fn udp_req(ptr: u64, len: u64) -> i64 {
+    const SERVER: [u8; 4] = [10, 0, 2, 2];
+    const PORT: u16 = 9000;
+
+    let n = core::cmp::min(len as usize, 256);
+    let mut req = [0u8; 256];
+    if n == 0 || read_user(ptr, &mut req[..n]).is_err() {
+        return err(klinux::errno::EFAULT);
+    }
+
+    let port = 49000u16.wrapping_add((crate::task::current_tid() as u16) % 1000);
+    let idx = match crate::net::udp_alloc(port) {
+        Some(i) => i,
+        None => return err(klinux::errno::EAGAIN),
+    };
+    if crate::net::udp_send(idx, SERVER, PORT, &req[..n]).is_err() {
+        return err(klinux::errno::ENETUNREACH);
+    }
+
+    let mut resp = [0u8; 512];
+    // 等回包（约 1 秒）
+    for _ in 0..3000 {
+        if let Some((_ip, _port, got)) = crate::net::udp_recv(idx, &mut resp) {
+            // SAFETY: 系统调用串行，长度已限制
+            unsafe {
+                let dst = core::slice::from_raw_parts_mut(
+                    core::ptr::addr_of_mut!(HTTP_BUF) as *mut u8,
+                    got,
+                );
+                dst.copy_from_slice(&resp[..got]);
+                HTTP_LEN = got;
+            }
+            return got as i64;
+        }
+        for _ in 0..2000 {
+            core::hint::spin_loop();
+        }
+    }
+    0
 }
 
 fn http_get(path_ptr: u64, path_len: u64) -> i64 {
@@ -260,6 +308,7 @@ pub fn dispatch(op: u64, a1: u64, a2: u64, _a3: u64) -> i64 {
         OP_RUN => run_cmd(a1, a2),
         OP_HTTP_GET => http_get(a1, a2),
         OP_HTTP_TAKE => http_take(a1, a2),
+        OP_UDP_REQ => udp_req(a1, a2),
         _ => err(klinux::errno::EINVAL),
     }
 }
