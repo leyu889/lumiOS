@@ -83,6 +83,9 @@ struct Desktop {
     term_len: usize,
     /* ---- 文件管理器（第 0 个窗口）---- */
     fm_entries: [DirEnt; DIR_MAX],
+    /// 最近一次点击的诊断：落在哪个窗口、命中什么区域（屏幕上可见）
+    hit_note: [u8; 40],
+    hit_len: usize,
     fm_n: usize,
     fm_sel: usize,
     /// 上次点击的行（简易双击判定）
@@ -150,6 +153,8 @@ impl Desktop {
             term_line: [0; 64],
             term_len: 0,
             fm_entries: [DirEnt { name: [0; 32], len: 0, is_dir: false }; DIR_MAX],
+            hit_note: [0; 40],
+            hit_len: 0,
             fm_n: 0,
             fm_sel: 0,
             fm_last_click: usize::MAX,
@@ -293,7 +298,15 @@ pub extern "C" fn _start() -> ! {
             let left = btn & 1 != 0;
             let was = d.dragging;
             if left && !was {
-                // 按下
+                // 按下：先把诊断记下来（屏幕上会显示，方便定位"点不动"）
+                {
+                    let note = match d.top_at(d.mx, d.my) {
+                        Some(w) => if w == 0 { "win0" } else { "winX" },
+                        None => "none",
+                    };
+                    d.hit_len = note.len().min(d.hit_note.len());
+                    d.hit_note[..d.hit_len].copy_from_slice(&note.as_bytes()[..d.hit_len]);
+                }
                 if let Some(wi) = d.top_at(d.mx, d.my) {
                     d.raise(wi);
                     if d.close_button_hit(wi, d.mx, d.my) {
@@ -515,6 +528,65 @@ fn draw_all(c: &Canvas, d: &Desktop) {
     // 浏览器窗口的 Chrome 风格外壳：标签条 + 地址栏
     if d.wins[2].visible {
         browser_chrome(c, d);
+    }
+
+    // 诊断读数：直接在屏幕上显示光标坐标与最近一次点击命中的窗口。
+    // 鼠标事件在无头虚拟机里注入不了，这块读数就是唯一能拿到的证据。
+    {
+        let mut buf = [0u8; 48];
+        let mut n = 0usize;
+        let mut num = |v: i32, buf: &mut [u8; 48], n: &mut usize| {
+            let mut t = [0u8; 8];
+            let mut k = 0usize;
+            let mut x = v.unsigned_abs();
+            if v < 0 && *n < 48 {
+                buf[*n] = b'-';
+                *n += 1;
+            }
+            if x == 0 {
+                if *n < 48 {
+                    buf[*n] = b'0';
+                    *n += 1;
+                }
+                return;
+            }
+            while x > 0 && k < 8 {
+                t[k] = b'0' + (x % 10) as u8;
+                x /= 10;
+                k += 1;
+            }
+            while k > 0 {
+                k -= 1;
+                if *n < 48 {
+                    buf[*n] = t[k];
+                    *n += 1;
+                }
+            }
+        };
+        num(d.mx, &mut buf, &mut n);
+        if n < 48 {
+            buf[n] = b',';
+            n += 1;
+        }
+        num(d.my, &mut buf, &mut n);
+        if n < 48 {
+            buf[n] = b' ';
+            n += 1;
+        }
+        for b in b"hit:" {
+            if n < 48 {
+                buf[n] = *b;
+                n += 1;
+            }
+        }
+        for b in d.hit_note[..d.hit_len].iter() {
+            if n < 48 {
+                buf[n] = *b;
+                n += 1;
+            }
+        }
+        let txt = unsafe { core::str::from_utf8_unchecked(&buf[..n]) };
+        c.text_bg(12, c.height as i32 - 48, txt, 0x00FF_D1_66, 0x0018_2130);
     }
 
     draw_cursor(c, d.mx, d.my);
@@ -1017,7 +1089,7 @@ fn is_builtin(cmd: &str) -> bool {
             | "rm" | "echo" | "dir" | "type" | "del" | "cls" | "copy" | "ubuntu" | "windows"
             | "ver" | "vol" | "set" | "where" | "tree" | "more" | "md" | "mkdir" | "rd"
             | "ren" | "move" | "exit" | "prompt" | "title" | "date" | "time" | "attrib"
-            | "update-lumios"
+            | "update-lumios" | "hit"
     )
 }
 
@@ -1203,6 +1275,53 @@ fn term_run(d: &mut Desktop) {
                         }
                     }
                 }
+                out_nl(d);
+            }
+        }
+        "hit" => {
+            // 诊断：hit x y —— 用与点击完全相同的判定，报告命中了什么
+            let mut nums = [0i32; 2];
+            let mut k = 0;
+            for part in cmdline.split_whitespace() {
+                if part == "hit" {
+                    continue;
+                }
+                let mut v = 0i32;
+                let mut ok = false;
+                for b in part.bytes() {
+                    if b.is_ascii_digit() {
+                        v = v * 10 + (b - b'0') as i32;
+                        ok = true;
+                    }
+                }
+                if ok && k < 2 {
+                    nums[k] = v;
+                    k += 1;
+                }
+            }
+            if k == 2 {
+                let (x, y) = (nums[0], nums[1]);
+                let w = d.wins[0];
+                let mut what = "none";
+                if d.close_button_hit(0, x, y) {
+                    what = "close";
+                } else if d.top_at(x, y) == Some(0) {
+                    if y < w.y + TITLE_H {
+                        what = "titlebar";
+                    } else if fm_sidebar_at(&w, x, y).is_some() {
+                        what = "sidebar";
+                    } else if fm_row_at(&w, x, y, 0).is_some() {
+                        what = "list";
+                    } else {
+                        what = "fm-body";
+                    }
+                }
+                out_str(d, "hit ");
+                write_num(d, x as u64);
+                out_str(d, ",");
+                write_num(d, y as u64);
+                out_str(d, " -> ");
+                out_str(d, what);
                 out_nl(d);
             }
         }
