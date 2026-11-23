@@ -1089,7 +1089,7 @@ fn is_builtin(cmd: &str) -> bool {
             | "rm" | "echo" | "dir" | "type" | "del" | "cls" | "copy" | "ubuntu" | "windows"
             | "ver" | "vol" | "set" | "where" | "tree" | "more" | "md" | "mkdir" | "rd"
             | "ren" | "move" | "exit" | "prompt" | "title" | "date" | "time" | "attrib"
-            | "update-lumios" | "hit"
+            | "update-lumios" | "hit" | "install"
     )
 }
 
@@ -1276,6 +1276,56 @@ fn term_run(d: &mut Desktop) {
                     }
                 }
                 out_nl(d);
+            }
+        }
+        "install" => {
+            // 安装向导（骨架）：枚举磁盘 -> 写盘自检 -> （下一步）刷镜像
+            let mut buf = [0u8; 64];
+            let n = disk_list(&mut buf).max(0) as usize;
+            if n == 0 {
+                out_str(d, "no installable disk found (AHCI not ready)");
+                out_nl(d);
+            } else {
+                out_str(d, "LumiOS installer - target disks:");
+                out_nl(d);
+                for i in 0..n {
+                    let slot = u32::from_le_bytes([buf[i * 8], buf[i * 8 + 1], buf[i * 8 + 2], buf[i * 8 + 3]]);
+                    let mib = u32::from_le_bytes([buf[i * 8 + 4], buf[i * 8 + 5], buf[i * 8 + 6], buf[i * 8 + 7]]);
+                    out_str(d, "  disk ");
+                    write_num(d, slot as u64);
+                    out_str(d, ": ");
+                    write_num(d, mib as u64);
+                    out_str(d, " MiB");
+                    out_nl(d);
+                }
+                if n == 1 {
+                    out_str(d, "only one disk (the boot disk). attach a 2nd disk to install.");
+                    out_nl(d);
+                } else {
+                    out_str(d, "run: install probe <n>   (write-test on disk n)");
+                    out_nl(d);
+                }
+                // install probe <n>
+                let mut parts = cmdline.split_whitespace();
+                let _ = parts.next();
+                if parts.next() == Some("probe") {
+                    if let Some(v) = parts.next() {
+                        let mut slot = 0u8;
+                        for b in v.bytes() {
+                            if b.is_ascii_digit() {
+                                slot = slot * 10 + (b - b'0');
+                            }
+                        }
+                        if n == 1 {
+                            out_str(d, "refused: that is the boot disk.");
+                            out_nl(d);
+                        } else {
+                            let r = disk_probe(slot);
+                            out_str(d, if r == 1 { "write probe OK (write+readback verified)" } else { "write probe FAILED" });
+                            out_nl(d);
+                        }
+                    }
+                }
             }
         }
         "hit" => {

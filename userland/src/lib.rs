@@ -310,6 +310,16 @@ pub fn udp_request(msg: &str) -> i64 {
     lumi(11, msg.as_ptr() as u64, msg.len() as u64)
 }
 
+/// 列出可安装磁盘：往里填 (slot, MiB) 对，返回条数。
+pub fn disk_list(out: &mut [u8]) -> i64 {
+    lumi(12, out.as_mut_ptr() as u64, out.len() as u64)
+}
+
+/// 写盘自检：在指定磁盘 LBA 1 写标记并读回。返回 1=成功。
+pub fn disk_probe(slot: u8) -> i64 {
+    lumi(13, slot as u64, 0)
+}
+
 fn lumi(op: u64, a: u64, b: u64) -> i64 {
     call(SYS_LUMI, op, a, b)
 }

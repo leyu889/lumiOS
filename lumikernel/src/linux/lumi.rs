@@ -45,6 +45,10 @@ const OP_HTTP_TAKE: u64 = 10;
 /// UDP 请求：a1=请求缓冲, a2=长度。发出后等回包，结果进 HTTP_BUF/HTTP_LEN。
 /// 为什么不用 TCP：knet 的 tcp.rs 只有报文头解析，没有握手状态机，连不上真实服务器。
 const OP_UDP_REQ: u64 = 11;
+/// 列出可安装的磁盘：往用户缓冲写 N 条 (slot u32, MiB u32)
+const OP_DISK_INFO: u64 = 12;
+/// 写盘自检：在指定 slot 的 LBA 1 写标记再读回，验证写入链路
+const OP_DISK_PROBE: u64 = 13;
 
 /// 帧缓冲在用户态看到的固定地址。
 pub const FB_VA_USER: u64 = 0x7000_0000;
@@ -292,6 +296,61 @@ fn run_cmd(ptr: u64, len: u64) -> i64 {
     r
 }
 
+/// 枚举 AHCI 磁盘，往用户缓冲写 `(slot, MiB)` 每条 8 字节，返回条数。
+fn disk_info(ptr: u64, cap: u64) -> i64 {
+    if !crate::dev::ahci::ready() {
+        return 0;
+    }
+    let mut out = [0u8; 64];
+    let mut n = 0usize;
+    for slot in 0..4usize {
+        if !crate::dev::ahci::slot_used(slot) {
+            continue;
+        }
+        let sectors = crate::dev::ahci::sectors(slot);
+        let mib = (sectors * 512 / (1024 * 1024)) as u32;
+        let base = n * 8;
+        if base + 8 <= out.len() {
+            out[base..base + 4].copy_from_slice(&(slot as u32).to_le_bytes());
+            out[base + 4..base + 8].copy_from_slice(&mib.to_le_bytes());
+            n += 1;
+        }
+    }
+    let want = core::cmp::min(n * 8, cap as usize);
+    if write_user(ptr, &out[..want]).is_err() {
+        return err(klinux::errno::EFAULT);
+    }
+    n as i64
+}
+
+/// 写盘自检：LBA 1 写 512 字节标记，再读回比对。
+///
+/// 只碰 LBA 1（分区表之后的空位），不会破坏引导扇区；
+/// 目的不是"安装"，而是先证明"这把刀能切"。
+fn disk_probe(slot_arg: u64) -> i64 {
+    let slot = (slot_arg & 0xFF) as usize;
+    if !crate::dev::ahci::ready() || !crate::dev::ahci::slot_used(slot) {
+        return err(klinux::errno::ENODEV);
+    }
+    let mut probe = [0u8; 512];
+    for (i, b) in b"LUMIOS-WRITE-PROBE".iter().enumerate() {
+        probe[i] = *b;
+    }
+    if crate::dev::ahci::write_sector(slot, 1, &probe).is_err() {
+        return err(klinux::errno::EIO);
+    }
+    let _ = crate::dev::ahci::flush(slot);
+    let mut back = [0u8; 512];
+    if crate::dev::ahci::read_sector(slot, 1, &mut back).is_err() {
+        return err(klinux::errno::EIO);
+    }
+    if back[..17] == probe[..17] {
+        1
+    } else {
+        0
+    }
+}
+
 fn write_user(ptr: u64, data: &[u8]) -> Result<(), i64> {
     crate::linux::uaccess::copy_out(ptr, data).map_err(|_| klinux::errno::EFAULT)
 }
@@ -309,6 +368,8 @@ pub fn dispatch(op: u64, a1: u64, a2: u64, _a3: u64) -> i64 {
         OP_HTTP_GET => http_get(a1, a2),
         OP_HTTP_TAKE => http_take(a1, a2),
         OP_UDP_REQ => udp_req(a1, a2),
+        OP_DISK_INFO => disk_info(a1, a2),
+        OP_DISK_PROBE => disk_probe(a1),
         _ => err(klinux::errno::EINVAL),
     }
 }
