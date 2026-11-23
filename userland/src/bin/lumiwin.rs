@@ -193,9 +193,10 @@ impl Desktop {
 
     fn close_button_hit(&self, wi: usize, x: i32, y: i32) -> bool {
         let w = self.wins[wi];
-        let bx = w.x + w.w - TITLE_H;
-        let by = w.y;
-        x >= bx && x < bx + TITLE_H && y >= by && y < by + TITLE_H
+        // 与 draw_window 里的小圆点一致：12x12，位于 (w.w-26, 11)
+        let bx = w.x + w.w - 26 - 4;
+        let by = w.y + 11 - 4;
+        x >= bx && x < bx + 20 && y >= by && y < by + 20
     }
 }
 
@@ -306,6 +307,32 @@ pub extern "C" fn _start() -> ! {
                             d.drag_dx = d.mx;
                             d.drag_dy = d.my;
                         } else if wi == 0 {
+                            // 先看侧栏：点 Home 回 /data，其余目录不存在就提示
+                            if let Some(sr) = fm_sidebar_at(&w, d.mx, d.my) {
+                                let names = ["", "Documents", "Downloads", "Music", "Pictures", "Videos"];
+                                let ok = if sr == 0 {
+                                    chdir("/data") == 0
+                                } else {
+                                    let mut pbuf = [0u8; 32];
+                                    pbuf[0] = b'/';
+                                    let n = names[sr].len();
+                                    pbuf[1..1 + n].copy_from_slice(names[sr].as_bytes());
+                                    let path = unsafe { core::str::from_utf8_unchecked(&pbuf[..1 + n]) };
+                                    chdir(path) == 0
+                                };
+                                if ok {
+                                    d.fm_sel = 0;
+                                    fm_refresh(&mut d);
+                                } else {
+                                    // 目录不存在：直接如实显示"空"
+                                    d.fm_n = 0;
+                                    d.fm_sel = 0;
+                                    fm_paint(&mut d);
+                                    d.dirty = true;
+                                }
+                                d.fm_last_click = usize::MAX;
+                                continue;
+                            }
                             // 文件管理器：点行就选中（以前只有键盘能选）
                             let visible = ((w.h - TITLE_H - 60) / 34).max(1) as usize;
                             let first = if d.fm_sel >= visible { d.fm_sel + 1 - visible } else { 0 };
@@ -1538,6 +1565,28 @@ fn repaint_term(d: &mut Desktop) {
 ///
 /// 抽出来是为了**能单独验证**：鼠标事件在 headless 虚拟机里注入不了，
 /// 但这段"坐标算出第几行"的数学可以拿合成坐标直接跑。
+/// 侧栏命中：Home / Documents / Downloads / Music / Pictures / Videos
+/// 返回 0..5，点空白返回 None。
+///
+/// 之前侧栏完全没接点击——`fm_row_at` 只算文件列表，x 小于列表起点就返回 None，
+/// 所以"点 Home、点 Documents 都没反应"。
+fn fm_sidebar_at(w: &Win, mx: i32, my: i32) -> Option<usize> {
+    let sx = w.x + 8;
+    let sy = w.y + TITLE_H + 44;
+    if mx < sx || mx >= w.x + 150 {
+        return None;
+    }
+    if my < sy {
+        return None;
+    }
+    let row = ((my - sy) / 34) as usize;
+    if row < 6 {
+        Some(row)
+    } else {
+        None
+    }
+}
+
 fn fm_row_at(w: &Win, mx: i32, my: i32, first: usize) -> Option<usize> {
     let lx = w.x + 162;
     let ly = w.y + TITLE_H + 44;
